@@ -1,11 +1,12 @@
-﻿# GTA VI PC 移植 · 自动启动器 v1.0
+﻿# GTA VI PC 移植 · 自动启动器 v1.3
 
-> 仓库: https://github.com/DKTTT/gta6-pc-launcher  ｜  作者: DKTTT  ｜  版本: v1.2
+> 仓库: https://github.com/DKTTT/gta6-pc-launcher  ｜  作者: DKTTT  ｜  版本: v1.3
 
 ![启动器界面](docs/screenshot-main.png)
 
 ![排行榜与推荐](docs/screenshot-leaderboard.png)
 
+![键盘映射](docs/screenshot-keymap.png)
 
 **作者**: DKTTT  ·  GitHub: https://github.com/DKTTT
 **日期**: 2026-11-26
@@ -111,3 +112,21 @@
 - 网络失败时自动使用上次缓存（`race-cache.json`）
 
 > 排行榜数据是各项目自报 + 第三方核实，仅供参考；启动器推荐的是"最适合本机硬件"的项目，不代表一定能玩。
+
+## 键盘映射（新增，⑤ 标签页）
+
+自己绑键：每行一条 `源键 = 目标键`，`#` 开头是注释。
+
+```
+CapsLock = Escape
+F1 = Tab
+W = Up
+```
+
+- 可用键名：`A-Z 0-9 F1-F12 Space Enter Esc Tab Shift Ctrl Alt CapsLock Backspace Up Down Left Right Home End PgUp PgDn Insert Delete Num0-Num9`，也可以直接写 `0x41` 这样的 VK 值
+- **只在游戏窗口聚焦时生效**（不影响打字/浏览器）
+- `Ctrl+Alt+M` 随时开/关映射
+- 勾选「启动游戏时自动开启映射」→ 启动游戏自动启用；关闭启动器自动卸载
+- 实现：系统级低级键盘钩子（`keymap.cs`）；若被杀毒软件拦截会提示安装失败
+
+> 注意：部分游戏用 DirectInput 原始输入时，键盘钩子可能收不到；本游戏（GameInput）实测可用。

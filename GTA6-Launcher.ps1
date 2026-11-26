@@ -29,6 +29,8 @@ $DefaultCfg = @{
     Build     = 'auto'
     Preset    = 'auto'
     RaceUrl   = 'https://vuyp.github.io/gta6-pc-race/src/data.json'
+    KeyMap    = ''
+    KeyMapOn  = $false
 }
 $Cfg = $DefaultCfg.Clone()
 if (Test-Path $ConfigPath) {
@@ -48,6 +50,8 @@ function Save-Cfg {
         $Cfg.Console = if ($rbAutoCon.Checked) { 'auto' } elseif ($rbSX.Checked) { 'series-x' } else { 'series-s' }
         $selH = ($heights | Where-Object { $rbResMap[$_].Checked } | Select-Object -First 1)
         $Cfg.Height = if ($rbAutoRes.Checked -or -not $selH) { 'auto' } else { "$selH" }
+        $Cfg.KeyMap = if ($txtKeyMap) { $txtKeyMap.Text } else { '' }
+        $Cfg.KeyMapOn = if ($chkKeyAuto) { [bool]$chkKeyAuto.Checked } else { $false }
         $Cfg | ConvertTo-Json -Depth 3 | Set-Content -Path $ConfigPath -Encoding UTF8
     } catch { }
 }
@@ -173,9 +177,11 @@ $tabBuild = New-Object System.Windows.Forms.TabPage
 $tabBuild.Text = '② 构建与下载'; $tabBuild.BackColor = $Bg
 $tabRun = New-Object System.Windows.Forms.TabPage
 $tabRun.Text = '③ 预热与启动'; $tabRun.BackColor = $Bg
+$tabKeys = New-Object System.Windows.Forms.TabPage
+$tabKeys.Text = '⑤ 键盘映射'; $tabKeys.BackColor = $Bg
 $tabRace = New-Object System.Windows.Forms.TabPage
 $tabRace.Text = '④ 排行榜与推荐'; $tabRace.BackColor = $Bg
-$tabs.TabPages.Add($tabHw); $tabs.TabPages.Add($tabBuild); $tabs.TabPages.Add($tabRun); $tabs.TabPages.Add($tabRace)
+$tabs.TabPages.Add($tabHw); $tabs.TabPages.Add($tabBuild); $tabs.TabPages.Add($tabRun); $tabs.TabPages.Add($tabRace); $tabs.TabPages.Add($tabKeys)
 
 # ---------------- Tab1: 设备与配置 ----------------
 $tabHw.Controls.Add((New-Label '本机硬件（自动检测）' 14 12 400 22 10))
@@ -323,6 +329,38 @@ $tabRace.Controls.Add((New-Label '为本机推荐（按显卡/显存/速度/稳�
 $lblRaceRec = New-Label '等待更新…' 14 418 960 100 9 $Green
 $tabRace.Controls.Add($lblRaceRec)
 
+# ---------------- Tab5: 键盘映射 ----------------
+$tabKeys.Controls.Add((New-Label '键盘映射（每行一条：源键 = 目标键，例如 CapsLock = Escape）' 14 12 700 22 10))
+$txtKeyMap = New-Object System.Windows.Forms.TextBox
+$txtKeyMap.Location = New-Object System.Drawing.Point(14, 40)
+$txtKeyMap.Size = New-Object System.Drawing.Size(960, 240)
+$txtKeyMap.Multiline = $true; $txtKeyMap.ScrollBars = 'Vertical'
+$txtKeyMap.BackColor = [System.Drawing.Color]::FromArgb(16, 12, 28); $txtKeyMap.ForeColor = $TextCol
+$txtKeyMap.Font = New-Object System.Drawing.Font('Consolas', 10)
+$tabKeys.Controls.Add($txtKeyMap)
+$tabKeys.Controls.Add((New-Label '可用键名：A-Z 0-9 F1-F12 Space Enter Esc Tab Shift Ctrl Alt CapsLock Backspace Up Down Left Right Home End PgUp PgDn Insert Delete Num0-Num9；也可写 0x41 这样的 VK 值' 14 286 960 22 8.5 $Muted))
+$btnKeyStart = New-Btn '启动映射' 14 316 150 36 $Green
+$btnKeyStop = New-Btn '停止映射' 174 316 150 36
+$btnKeySave = New-Btn '保存映射' 334 316 150 36
+$btnKeyTest = New-Btn '测试按键（显示最后捕获的键）' 494 316 280 36
+$tabKeys.Controls.Add($btnKeyStart); $tabKeys.Controls.Add($btnKeyStop); $tabKeys.Controls.Add($btnKeySave); $tabKeys.Controls.Add($btnKeyTest)
+$lblKeyStatus = New-Label '映射未启动' 14 364 960 22 9 $Muted
+$tabKeys.Controls.Add($lblKeyStatus)
+$chkKeyAuto = New-Object System.Windows.Forms.CheckBox
+$chkKeyAuto.Text = '启动游戏时自动开启映射'
+$chkKeyAuto.Location = New-Object System.Drawing.Point(14, 390)
+$chkKeyAuto.Size = New-Object System.Drawing.Size(260, 24)
+$chkKeyAuto.ForeColor = $TextCol; $chkKeyAuto.BackColor = $Bg; $chkKeyAuto.Checked = $true
+$tabKeys.Controls.Add($chkKeyAuto)
+$tabKeys.Controls.Add((New-Label '说明：只在游戏窗口聚焦时生效；Ctrl+Alt+M 随时开/关；停止启动器自动卸载。' 14 392 960 22 9 $Muted))
+$txtKeyLast = New-Object System.Windows.Forms.TextBox
+$txtKeyLast.Location = New-Object System.Drawing.Point(14, 422)
+$txtKeyLast.Size = New-Object System.Drawing.Size(960, 26)
+$txtKeyLast.ReadOnly = $true
+$txtKeyLast.BackColor = [System.Drawing.Color]::FromArgb(16, 12, 28); $txtKeyLast.ForeColor = $TextCol
+$txtKeyLast.Font = New-Object System.Drawing.Font('Consolas', 9)
+$tabKeys.Controls.Add($txtKeyLast)
+
 # 日志
 $logBox = New-Object System.Windows.Forms.TextBox
 $logBox.Location = New-Object System.Drawing.Point(16, 600)
@@ -347,6 +385,7 @@ $script:warmSawDone = $false
 $script:autoStage = 0
 $script:race = $null
 $script:raceRec = $null
+$script:mapperWanted = $false
 $script:raceCache = Join-Path $Root 'race-cache.json'
 $script:outLog = Join-Path $env:TEMP 'gta6-launcher-warm.out.log'
 $script:errLog = Join-Path $env:TEMP 'gta6-launcher-warm.err.log'
@@ -678,6 +717,11 @@ function Launch-Game {
         $script:game = Start-Process -FilePath $script:exe -ArgumentList @('run', $gameExe, '--execute', '--console', $envInfo.Console) `
             -WorkingDirectory (Split-Path $script:exe) -PassThru
         Add-Log ("游戏已启动 PID={0}" -f $script:game.Id)
+        if ($chkKeyAuto.Checked) {
+            Start-Sleep -Milliseconds 800
+            Start-Mapper
+            Add-Log '已按设置自动开启键盘映射'
+        }
         $lblStatus.Text = '游戏运行中…'
         $btnLaunch.Enabled = $false
     } catch {
@@ -1002,6 +1046,91 @@ function Update-Race {
     }
 }
 
+# ---------------------------------------------------------------- 键盘映射
+function KeyNameToVk([string]$name) {
+    if (-not $name) { return -1 }
+    $n = $name.Trim()
+    if (-not $n) { return -1 }
+    if ($n -match '^0x[0-9a-fA-F]+$') { return [Convert]::ToInt32($n, 16) }
+    if ($n -match '^\d+$') { return [int]$n }
+    $up = $n.ToUpper()
+    if ($up.Length -eq 1 -and $up -match '^[A-Z0-9]$') { return [int][char]$up }
+    $table = @{
+        'F1' = 0x70; 'F2' = 0x71; 'F3' = 0x72; 'F4' = 0x73; 'F5' = 0x74; 'F6' = 0x75
+        'F7' = 0x76; 'F8' = 0x77; 'F9' = 0x78; 'F10' = 0x79; 'F11' = 0x7A; 'F12' = 0x7B
+        'SPACE' = 0x20; 'ENTER' = 0x0D; 'RETURN' = 0x0D; 'ESC' = 0x1B; 'ESCAPE' = 0x1B
+        'TAB' = 0x09; 'SHIFT' = 0x10; 'CTRL' = 0x11; 'CONTROL' = 0x11; 'ALT' = 0x12
+        'CAPSLOCK' = 0x14; 'BACKSPACE' = 0x08; 'UP' = 0x26; 'DOWN' = 0x28; 'LEFT' = 0x25; 'RIGHT' = 0x27
+        'HOME' = 0x24; 'END' = 0x23; 'PGUP' = 0x21; 'PAGEUP' = 0x21; 'PGDN' = 0x22; 'PAGEDOWN' = 0x22
+        'INSERT' = 0x2D; 'INS' = 0x2D; 'DELETE' = 0x2E; 'DEL' = 0x2E
+        'SEMICOLON' = 0xBA; 'EQUALS' = 0xBB; 'COMMA' = 0xBC; 'MINUS' = 0xBD; 'PERIOD' = 0xBE
+        'SLASH' = 0xBF; 'BACKSLASH' = 0xDC; 'LBRACKET' = 0xDB; 'RBRACKET' = 0xDD; 'QUOTE' = 0xDE; 'TILDE' = 0xC0
+    }
+    for ($i = 0; $i -le 9; $i++) { $table["NUM$i"] = 0x60 + $i; $table["NUMPAD$i"] = 0x60 + $i }
+    if ($table.ContainsKey($up)) { return [int]$table[$up] }
+    return -1
+}
+
+function Parse-KeyMap {
+    $d = New-Object 'System.Collections.Generic.Dictionary[int,int]'
+    $errs = @()
+    $lines = @()
+    if ($txtKeyMap) { $lines = $txtKeyMap.Text -split "`r?`n" }
+    foreach ($line in $lines) {
+        $s = $line.Trim()
+        if (-not $s) { continue }
+        if ($s.StartsWith('#')) { continue }
+        if ($s -notmatch '=') { $errs += "格式错误: $s"; continue }
+        $parts = $s -split '=', 2
+        $a = KeyNameToVk $parts[0]
+        $b = KeyNameToVk $parts[1]
+        if ($a -lt 0) { $errs += "未知源键: $($parts[0].Trim())"; continue }
+        if ($b -lt 0) { $errs += "未知目标键: $($parts[1].Trim())"; continue }
+        $d[[int]$a] = [int]$b
+    }
+    return [pscustomobject]@{ Map = $d; Errors = $errs }
+}
+
+function Start-Mapper {
+    try {
+        if (-not ('KeyMap' -as [type])) {
+            $csPath = Join-Path $Root 'keymap.cs'
+            if (-not (Test-Path $csPath)) { Add-Log '缺少 keymap.cs，无法启动映射'; return }
+            Add-Type -TypeDefinition (Get-Content $csPath -Raw -Encoding UTF8)
+        }
+        $parsed = Parse-KeyMap
+        if ($parsed.Errors.Count -gt 0) {
+            Add-Log ("映射表有错误: " + ($parsed.Errors -join '; '))
+            [System.Windows.Forms.MessageBox]::Show(($parsed.Errors -join "`r`n"), '映射表错误')
+            return
+        }
+        if ($parsed.Map.Count -eq 0) { Add-Log '映射表为空，先写几条映射'; return }
+        [KeyMap]::Map = $parsed.Map
+        if ($script:game -and -not $script:game.HasExited) {
+            try { if ($script:game.MainWindowHandle -ne [IntPtr]::Zero) { [KeyMap]::GameWindow = $script:game.MainWindowHandle } } catch { }
+        }
+        [KeyMap]::Enabled = $true
+        $ok = [KeyMap]::Install()
+        if ($ok) {
+            $script:mapperWanted = $true
+            $lblKeyStatus.Text = ("映射已启动：{0} 条（仅在游戏窗口聚焦时生效，Ctrl+Alt+M 开关）" -f $parsed.Map.Count)
+            Add-Log ("键盘映射已启动: {0} 条" -f $parsed.Map.Count)
+        } else {
+            $lblKeyStatus.Text = '钩子安装失败（可能被杀毒/安全软件拦截）'
+            Add-Log '键盘钩子安装失败'
+        }
+    } catch { Add-Log ("键盘映射启动失败: " + $_.Exception.Message) }
+}
+
+function Stop-Mapper {
+    try {
+        if ('KeyMap' -as [type]) { [KeyMap]::Uninstall() }
+        $script:mapperWanted = $false
+        $lblKeyStatus.Text = '映射已停止'
+        Add-Log '键盘映射已停止'
+    } catch { }
+}
+
 # ---------------------------------------------------------------- 事件
 foreach ($b in $btnBrowse) {
     $b.Add_Click({
@@ -1014,6 +1143,13 @@ foreach ($b in $btnBrowse) {
 }
 $btnScan.Add_Click({ Scan-Builds })
 $btnRaceNow.Add_Click({ Update-Race })
+$btnKeyStart.Add_Click({ Start-Mapper })
+$btnKeyStop.Add_Click({ Stop-Mapper })
+$btnKeySave.Add_Click({ Save-Cfg; try { $r = Parse-KeyMap; Add-Log ("映射已保存：{0} 条（{1} 个错误）" -f $r.Map.Count, $r.Errors.Count) } catch { } })
+$btnKeyTest.Add_Click({
+    Start-Mapper
+    Add-Log '按键测试：请按下任意键，下面状态栏会显示最后捕获的键'
+})
 $btnCheck.Add_Click({ Check-Update })
 $btnUpdate.Add_Click({ Update-Build })
 $btnRollback.Add_Click({ Rollback-Build })
@@ -1032,6 +1168,18 @@ $timer.Interval = 250
 $timer.Add_Tick({
     try { Update-Warm } catch { Add-Log ("更新出错: " + $_.Exception.Message) }
     try {
+        if ('KeyMap' -as [type]) {
+            if ($script:game -and -not $script:game.HasExited) {
+                try { if ($script:game.MainWindowHandle -ne [IntPtr]::Zero) { [KeyMap]::GameWindow = $script:game.MainWindowHandle } } catch { }
+            } else { [KeyMap]::GameWindow = [IntPtr]::Zero }
+            $txtKeyLast.Text = [KeyMap]::Status()
+            if ([KeyMap]::Map.Count -gt 0) {
+                $st = if ([KeyMap]::Enabled) { '启用中' } else { '暂停（Ctrl+Alt+M 开启）' }
+                $lblKeyStatus.Text = ("映射已安装：{0} 条 | {1}" -f [KeyMap]::Map.Count, $st)
+            }
+        }
+    } catch { }
+    try {
         if ($script:game -and $script:game.HasExited) {
             Add-Log ("游戏已退出（{0}）" -f $script:game.ExitCode)
             $script:game = $null; $btnLaunch.Enabled = $true; $lblStatus.Text = '游戏已退出'
@@ -1044,14 +1192,40 @@ $form.Add_FormClosing({
     try { Save-Cfg } catch { }
     try { if ($script:proc -and -not $script:proc.HasExited) { $script:proc.Kill($true) } } catch { }
     try { if ($chkOpenDir.Checked -and $script:game -and -not $script:game.HasExited) { $script:game.Kill($true) } } catch { }
+    try { if ('KeyMap' -as [type]) { [KeyMap]::Uninstall() } } catch { }
 })
 $form.Add_Shown({
     Refresh-Hw
     Scan-Builds
+    try {
+        if ($Cfg.KeyMap) { $txtKeyMap.Text = $Cfg.KeyMap }
+        else { $txtKeyMap.Text = "# 每行一条：源键 = 目标键`r`n# CapsLock = Escape`r`n# F1 = Tab" }
+        if ($Cfg.ContainsKey('KeyMapOn')) { $chkKeyAuto.Checked = [bool]$Cfg.KeyMapOn }
+    } catch { }
     $raceTimer = New-Object System.Windows.Forms.Timer
     $raceTimer.Interval = 1500
     $raceTimer.Add_Tick({ $this.Stop(); try { Update-Race } catch { } })
     $raceTimer.Start()
+    if ($env:GTA6_LAUNCHER_KEYTEST) {
+        try {
+            $txtKeyMap.Text = "CapsLock = Escape`r`nF1 = Tab`r`nW = Up`r`n# 注释行会被忽略"
+            $parsed = Parse-KeyMap
+            $errTxt = "BadKey = A"
+            $txtKeyMap.Text = $txtKeyMap.Text + "`r`n" + $errTxt
+            $parsedErr = Parse-KeyMap
+            $txtKeyMap.Text = "CapsLock = Escape`r`nF1 = Tab`r`nW = Up"
+            Start-Mapper
+            Start-Sleep -Milliseconds 500
+            $lines = @()
+            $lines += "mapCount=" + $parsed.Map.Count
+            $lines += "parseGood=" + $parsed.Map.Count + " errors=0"
+            $lines += "parseBadDetected=" + $parsedErr.Errors.Count
+            if ('KeyMap' -as [type]) { $lines += "status=" + [KeyMap]::Status(); [KeyMap]::Uninstall() }
+            $lines += "uninstall=" + $(if ('KeyMap' -as [type]) { [KeyMap]::Status() } else { 'n/a' })
+            Set-Content -Path $env:GTA6_LAUNCHER_KEYTEST -Value ($lines -join "`r`n") -Encoding UTF8
+        } catch { Set-Content -Path $env:GTA6_LAUNCHER_KEYTEST -Value ("ERR " + $_.Exception.Message) -Encoding UTF8 }
+        $form.Close()
+    }
     if ($env:GTA6_LAUNCHER_ROLLTEST) {
         try {
             $idx = -1
@@ -1162,5 +1336,5 @@ if ($env:GTA6_LAUNCHER_CHECKUPDATE) {
 
 $lblAuthor = New-Label '作者: DKTTT (github.com/DKTTT)  ·  基于 VIctory 社区项目 (avatarmanz / trustno1-coder / fxceless / codec-d)  ·  v1.0' 16 776 1012 20 8.5 $Muted
 $form.Controls.Add($lblAuthor)
-Add-Log 'GTA VI 自动启动器 v1.0 by DKTTT'
+Add-Log 'GTA VI 自动启动器 v1.3 by DKTTT'
 [void]$form.ShowDialog()
