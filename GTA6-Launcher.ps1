@@ -702,8 +702,13 @@ function Stop-Warm {
 function Launch-Game {
     try {
         if (-not $script:exe) { Add-Log '请先选择构建'; return }
-        $already = @(Get-Process victory -EA SilentlyContinue | Where-Object { $_.MainWindowTitle -ne '' })
-        if ($already.Count -gt 0) { Add-Log '已有游戏在运行'; [System.Windows.Forms.MessageBox]::Show('已有游戏在运行，请先关闭。'); return }
+        $already = @(Get-Process victory -EA SilentlyContinue)
+        if ($already.Count -gt 0) {
+            $pids = ($already | ForEach-Object { $_.Id }) -join ', '
+            Add-Log ("检测到已有 victory 进程（PID: {0}），拒绝重复启动（否则会因文件锁报 0x80070005）" -f $pids)
+            [System.Windows.Forms.MessageBox]::Show(("已经有游戏/预热进程在运行（PID: {0}）。`r`n`r`n请先关闭游戏窗口或结束这些进程，否则会报 0x80070005（拒绝访问）。" -f $pids), '已有实例在运行')
+            return
+        }
         if ($script:cacheState -and $script:cacheState.State -ne 'ok') {
             $r = [System.Windows.Forms.MessageBox]::Show("$($script:cacheState.Text)`r`n`r`n仍然启动吗？（建议先「全部预热」）", '缓存可能过期', 'YesNo', 'Warning')
             if ($r -ne 'Yes') { return }
@@ -1336,5 +1341,5 @@ if ($env:GTA6_LAUNCHER_CHECKUPDATE) {
 
 $lblAuthor = New-Label '作者: DKTTT (github.com/DKTTT)  ·  基于 VIctory 社区项目 (avatarmanz / trustno1-coder / fxceless / codec-d)  ·  v1.0' 16 776 1012 20 8.5 $Muted
 $form.Controls.Add($lblAuthor)
-Add-Log 'GTA VI 自动启动器 v1.3 by DKTTT'
+Add-Log 'GTA VI 自动启动器 v1.3.1 by DKTTT'
 [void]$form.ShowDialog()

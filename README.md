@@ -1,12 +1,4 @@
-﻿# GTA VI PC 移植 · 自动启动器 v1.3
-
-> 仓库: https://github.com/DKTTT/gta6-pc-launcher  ｜  作者: DKTTT  ｜  版本: v1.3
-
-![启动器界面](docs/screenshot-main.png)
-
-![排行榜与推荐](docs/screenshot-leaderboard.png)
-
-![键盘映射](docs/screenshot-keymap.png)
+﻿# GTA VI PC 移植 · 自动启动器 v1.0
 
 **作者**: DKTTT  ·  GitHub: https://github.com/DKTTT
 **日期**: 2026-11-26
@@ -130,3 +122,9 @@ W = Up
 - 实现：系统级低级键盘钩子（`keymap.cs`）；若被杀毒软件拦截会提示安装失败
 
 > 注意：部分游戏用 DirectInput 原始输入时，键盘钩子可能收不到；本游戏（GameInput）实测可用。
+
+## v1.3.1 修复
+
+- **多开检测加强**：以前只检测"有窗口的 victory 进程"，如果另一个实例还在加载（窗口未出现）就拦不住，第二个实例会因缓存/存档文件锁报 `0x80070005（拒绝访问）`。现在检测**任意 victory 进程**，并提示具体 PID。
+- 启动游戏前若检测到残留进程，会弹窗提示先关闭，避免 `0x800005`。
+- 启动前可用任务管理器或命令行 `taskkill /F /IM victory.exe /T` 清理残留。
