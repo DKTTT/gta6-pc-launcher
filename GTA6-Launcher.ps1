@@ -517,14 +517,12 @@ function Refresh-Hw {
 }
 
 # ---------------------------------------------------------------- 构建扫描
-function Scan-Builds {
-    $lstBuilds.Items.Clear()
-    $root = $tbBuildRoot.Text.Trim()
-    if (-not (Test-Path $root)) { Add-Log "构建根目录不存在: $root"; return }
+function Find-VictoryBuilds([string]$root) {
     $found = @()
+    if (-not $root -or -not (Test-Path $root)) { return @() }
     foreach ($profile in 'diag', 'release') {
         Get-ChildItem $root -Recurse -Depth 6 -Filter 'victory.exe' -EA SilentlyContinue |
-            Where-Object { $_.FullName -match "\\target\\$profile\\victory.exe$" } |
+            Where-Object { $_.FullName -match "\\target\\$profile\\victory\.exe$" } |
             ForEach-Object {
                 $proj = $_.FullName -replace "\\target\\$profile\\victory\.exe$", ''
                 $found += [pscustomobject]@{
@@ -533,14 +531,46 @@ function Scan-Builds {
                 }
             }
     }
-    $found = $found | Sort-Object Project, Profile -Unique
+    return @($found | Sort-Object Project, Profile -Unique)
+}
+
+function Scan-Builds {
+    $lstBuilds.Items.Clear()
+    $root = $tbBuildRoot.Text.Trim()
+    $found = @(Find-VictoryBuilds $root)
+    if ($found.Count -eq 0) {
+        Add-Log ("构建根目录 {0} 没找到构建，自动尝试其它常见目录…" -f $(if ($root) { $root } else { '(空)' }))
+        $candidates = @(
+            'E:\gta6\work',
+            'D:\gta6\work',
+            (Join-Path $env:USERPROFILE 'gta6\work'),
+            (Join-Path $Root 'work'),
+            $Root
+        ) | Where-Object { $_ -and ($_ -ne $root) } | Select-Object -Unique
+        foreach ($c in $candidates) {
+            if (-not (Test-Path $c)) { continue }
+            $tryFound = @(Find-VictoryBuilds $c)
+            Add-Log ("  尝试 {0} → {1} 个构建" -f $c, $tryFound.Count)
+            if ($tryFound.Count -gt 0) {
+                $root = $c; $found = $tryFound
+                $tbBuildRoot.Text = $c
+                Add-Log ("已自动切换到构建根目录: {0}" -f $c)
+                try { $Cfg.BuildRoot = $c } catch { }
+                break
+            }
+        }
+    }
+    if ($found.Count -eq 0) {
+        Add-Log ("没有找到任何 victory.exe。请在「构建根目录」选择含 */target/diag|release/victory.exe 的目录（当前: {0}）" -f $root)
+        try { [System.Windows.Forms.MessageBox]::Show(("没有扫描到任何 victory.exe。`r`n`r`n当前构建根目录：{0}`r`n`r`n请点「构建根目录」旁的「浏览…」选择包含以下结构的目录：`r`n  工程名\target\diag\victory.exe`r`n  工程名\target\release\victory.exe" -f $root), '未找到本地构建', 'OK', 'Warning') } catch { }
+        return
+    }
     foreach ($f in $found) {
         $lstBuilds.Items.Add(('{0}  [{1}]  {2} MB  {3:MM-dd HH:mm}' -f $f.Name, $f.Profile, $f.SizeMB, $f.Time)) | Out-Null
     }
     $script:builds = $found
     Add-Log ("扫描到 {0} 个本地构建" -f $found.Count)
     if ($lstBuilds.Items.Count -gt 0) {
-        # 按硬件推荐挑默认构建：NVIDIA -> vf-nvidia/nvidia；AMD -> vf-main/upstream/7900；其次稳定版
         $pref = 'vf-main'
         if ($script:hw) {
             if ($script:hw.Vendor -eq 'NVIDIA') { $pref = 'vf-nvidia|nvidia' }
@@ -1844,5 +1874,5 @@ if ($env:GTA6_LAUNCHER_CHECKUPDATE) {
 
 $lblAuthor = New-Label '作者: DKTTT (github.com/DKTTT)  ·  基于 VIctory 社区项目 (avatarmanz / trustno1-coder / fxceless / codec-d)  ·  v1.0' 16 776 1012 20 8.5 $Muted
 $form.Controls.Add($lblAuthor)
-Add-Log 'GTA VI 自动启动器 v1.7 by DKTTT'
+Add-Log 'GTA VI 自动启动器 v1.7.1 by DKTTT'
 [void]$form.ShowDialog()
