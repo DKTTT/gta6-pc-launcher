@@ -262,7 +262,9 @@ $tabBuild.Controls.Add((New-Label '分支' 392 268 40 22))
 $tbBranch = New-Tb $Cfg.Branch 436 264 180
 $tabBuild.Controls.Add($tbBranch)
 $tabBuild.Controls.Add((New-Label '下载到' 630 268 60 22))
-$tbDlDir = New-Tb (Join-Path $Cfg.BuildRoot 'downloaded') 694 264 270
+$dlDefault = $Cfg.BuildRoot
+try { $dlDefault = Join-Path $Cfg.BuildRoot 'downloaded' -ErrorAction Stop } catch { $dlDefault = $Cfg.BuildRoot + '\downloaded' }
+$tbDlDir = New-Tb $dlDefault 694 264 270
 $tabBuild.Controls.Add($tbDlDir)
 $btnDlSrc = New-Btn '下载源码 ZIP' 14 300 160 32 $Accent
 $btnDlRel = New-Btn '下载 Release' 184 300 140 32
@@ -1891,5 +1893,5 @@ if ($env:GTA6_LAUNCHER_CHECKUPDATE) {
 
 $lblAuthor = New-Label '作者: DKTTT (github.com/DKTTT)  ·  基于 VIctory 社区项目 (avatarmanz / trustno1-coder / fxceless / codec-d)  ·  v1.0' 16 776 1012 20 8.5 $Muted
 $form.Controls.Add($lblAuthor)
-Add-Log 'GTA VI 自动启动器 v1.7.2 by DKTTT'
+Add-Log 'GTA VI 自动启动器 v1.7.3 by DKTTT'
 [void]$form.ShowDialog()
