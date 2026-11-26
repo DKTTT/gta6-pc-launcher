@@ -330,9 +330,19 @@ $btnRacePull = New-Btn '拉取选中项目构建' 174 350 180 32 $Green
 $lblRaceSrc = New-Label '数据源: vuyp.github.io/gta6-pc-race（启动时自动拉取；双击列表行也可拉取）' 364 356 620 22 9 $Muted
 $tabRace.Controls.Add($btnRaceNow); $tabRace.Controls.Add($btnRacePull)
 $tabRace.Controls.Add($lblRaceSrc)
-$tabRace.Controls.Add((New-Label '为本机推荐（按显卡/显存/速度/稳定性匹配）' 14 392 500 22 10))
-$lblRaceRec = New-Label '等待更新…' 14 418 1030 150 9 $Green
-$tabRace.Controls.Add($lblRaceRec)
+$tabRace.Controls.Add((New-Label '为本机推荐（点选/双击可直接拉取对应构建）' 14 388 700 22 10))
+$lstRec = New-Object System.Windows.Forms.ListBox
+$lstRec.Location = New-Object System.Drawing.Point(14, 414)
+$lstRec.Size = New-Object System.Drawing.Size(1030, 84)
+$lstRec.BackColor = [System.Drawing.Color]::FromArgb(16, 12, 28); $lstRec.ForeColor = $Green
+$lstRec.Font = New-Object System.Drawing.Font('Consolas', 9.5)
+$lstRec.HorizontalScrollbar = $true
+$tabRace.Controls.Add($lstRec)
+$btnRecPull = New-Btn '拉取选中推荐构建' 14 506 190 32 $Green
+$btnRecRepo = New-Btn '打开项目仓库' 214 506 160 32
+$tabRace.Controls.Add($btnRecPull); $tabRace.Controls.Add($btnRecRepo)
+$lblLocalBuilds = New-Label '本地构建在榜情况：等待更新…' 384 510 660 22 9 $Muted
+$tabRace.Controls.Add($lblLocalBuilds)
 
 # ---------------- Tab5: 键盘映射 ----------------
 $tabKeys.Controls.Add((New-Label '键盘映射（每行一条：源键 = 目标键，例如 CapsLock = Escape）' 14 12 700 22 10))
@@ -392,6 +402,7 @@ $script:race = $null
 $script:raceRec = $null
 $script:mapperWanted = $false
 $script:raceList = @()
+$script:recProjects = @()
 $script:logDir = Join-Path $Root 'logs'
 $script:gameLog = $null
 $script:gameStart = $null
@@ -1007,6 +1018,7 @@ function Update-Race {
         }
         $lstRace.Items.Clear()
         $script:raceList = @()
+$script:recProjects = @()
 $script:logDir = Join-Path $Root 'logs'
 $script:gameLog = $null
 $script:gameStart = $null
@@ -1021,18 +1033,21 @@ $script:crashCount = 0
 
         $scored = Get-RaceRecommendation $data
         if ($scored.Count -gt 0) {
-            $lines = @()
-            $lines += ("本机: {0} / {1} GB 显存 / {2} GB 内存 → 推荐前 3：" -f $script:hw.Vendor, [math]::Round($script:hw.VramMB / 1024, 0), $script:hw.RamGB)
+            $lstRec.Items.Clear()
+            $script:recProjects = @()
             $i = 0
+            $lines = @()
+            $marks = @('①', '②', '③')
             foreach ($s in ($scored | Select-Object -First 3)) {
                 $i++
                 $p = $s.Project
-                $gpu = (@($p.tested.gpu) -join ', ')
-                $lines += ("  {0}. {1}（榜上第 {2} 名, 匹配分 {3}）" -f $i, $p.name, $p.pos, $s.Score)
-                $lines += ("     画面{0}/5 速度{1}/6 稳定{2}/4 | 测试显卡: {3}" -f (LaneStep $p.lanes.picture), (SpeedStep $p.lanes.speed), (StabilityStep $p.lanes.stability), $(if ($gpu) { $gpu } else { '未注明' }))
                 $local = Find-LocalBuildForRepo $p.repo
-                if ($local) { $lines += ("     ✅ 本地已有对应构建: {0} → 去「② 构建与下载」选它" -f $local) }
-                else { $lines += ("     → 本地没有，仓库: https://github.com/{0}" -f $p.repo) }
+                $locTxt = "本地没有（双击拉取）"
+                if ($local) { $locTxt = "本地已有: " + $local }
+                $row = ("{0} {1}  第{2}名 分{3} 画面{4}/5 速度{5}/6 稳定{6}/4  {7}" -f $marks[$i-1], $p.name, $p.pos, $s.Score, (LaneStep $p.lanes.picture), (SpeedStep $p.lanes.speed), (StabilityStep $p.lanes.stability), $locTxt)
+                [void]$lstRec.Items.Add($row)
+                $script:recProjects += $p
+                $lines += $row
             }
             # 你的本地构建在榜上排第几
             $lines += ''
@@ -1067,8 +1082,25 @@ $script:crashCount = 0
                     }
                 }
             }
-            if ($bestLocal) { $lines += ("  ★ 本地最适合你的构建: {0}" -f $bestLocal) }
-            $lblRaceRec.Text = ($lines -join "`r`n")
+            if ($bestLocal) { $lines += ("★ 本地最适合: {0}" -f $bestLocal) }
+            $sum = @()
+            $sumSeen = @{}
+            foreach ($b in @($script:builds)) {
+                if ($sumSeen.ContainsKey($b.Name)) { continue }
+                $sumSeen[$b.Name] = 1
+                $cands = @(Get-RepoCandidates $b.Project)
+                foreach ($c in $cands) {
+                    $m3 = @($data.projects | Where-Object { $_.repo -and ($_.repo -ieq $c) } | Select-Object -First 1)
+                    if ($m3.Count -gt 0) { $sum += ("{0}→{1}#{2}" -f $b.Name, $m3[0].name, $m3[0].pos); break }
+                }
+            }
+            $sumTxt = '无匹配'
+            if ($sum.Count -gt 0) { $sumTxt = ($sum -join ' | ') }
+            if ($sumTxt.Length -gt 115) { $sumTxt = $sumTxt.Substring(0, 115) + '…' }
+            $bestTxt = ''
+            if ($bestLocal) { $bestTxt = "  ★ 本地最佳: " + $bestLocal }
+            $lblLocalBuilds.Text = ("本地构建在榜：{0}{1}" -f $sumTxt, $bestTxt)
+            Add-Log ("推荐: " + ($lines -join ' / '))
             $script:raceRec = $scored
             Add-Log ("排行榜推荐已生成（{0} 行）：{1}" -f $lines.Count, ((@($scored | Select-Object -First 3) | ForEach-Object { $_.Project.name }) -join ' > '))
         }
@@ -1425,6 +1457,7 @@ function Stop-Mapper {
         if ('KeyMap' -as [type]) { [KeyMap]::Uninstall() }
         $script:mapperWanted = $false
 $script:raceList = @()
+$script:recProjects = @()
 $script:logDir = Join-Path $Root 'logs'
 $script:gameLog = $null
 $script:gameStart = $null
@@ -1512,6 +1545,21 @@ $btnRacePull.Add_Click({
 $lstRace.Add_DoubleClick({
     if ($lstRace.SelectedIndex -ge 0 -and $script:raceList) { Pull-RaceBuild $script:raceList[$lstRace.SelectedIndex] }
 })
+$lstRec.Add_DoubleClick({
+    if ($lstRec.SelectedIndex -ge 0 -and $script:recProjects -and $script:recProjects.Count -gt $lstRec.SelectedIndex) { Pull-RaceBuild $script:recProjects[$lstRec.SelectedIndex] }
+})
+$btnRecPull.Add_Click({
+    if ($lstRec.SelectedIndex -ge 0 -and $script:recProjects -and $script:recProjects.Count -gt $lstRec.SelectedIndex) { Pull-RaceBuild $script:recProjects[$lstRec.SelectedIndex] }
+    else { Add-Log '先在上面的推荐列表里选一个项目' }
+})
+$btnRecRepo.Add_Click({
+    try {
+        if ($lstRec.SelectedIndex -ge 0 -and $script:recProjects -and $script:recProjects.Count -gt $lstRec.SelectedIndex) {
+            $rp = $script:recProjects[$lstRec.SelectedIndex]
+            if ($rp.repo) { Start-Process ("https://github.com/" + $rp.repo) } else { Add-Log '该项目没有公开仓库' }
+        } else { Add-Log '先选一个推荐项目' }
+    } catch { }
+})
 $btnKeyStart.Add_Click({ Start-Mapper })
 $btnKeyStop.Add_Click({ Stop-Mapper })
 $btnKeySave.Add_Click({ Save-Cfg; try { $r = Parse-KeyMap; Add-Log ("映射已保存：{0} 条（{1} 个错误）" -f $r.Map.Count, $r.Errors.Count) } catch { } })
@@ -1598,6 +1646,28 @@ $form.Add_Shown({
     $raceTimer.Interval = 1500
     $raceTimer.Add_Tick({ $this.Stop(); try { Update-Race } catch { } })
     $raceTimer.Start()
+    if ($env:GTA6_LAUNCHER_LAYOUTTEST) {
+        try {
+            $lines = @()
+            $lines += ("form=" + $form.ClientSize.Width + "x" + $form.ClientSize.Height)
+            $lines += ("racePage=" + $tabRace.ClientSize.Width + "x" + $tabRace.ClientSize.Height)
+            $lines += ("runPage=" + $tabRun.ClientSize.Width + "x" + $tabRun.ClientSize.Height)
+            foreach ($pg in @($tabRace, $tabRun, $tabKeys)) {
+                $lines += ("--- " + $pg.Text + " ---")
+                $maxB = 0
+                foreach ($c in $pg.Controls) {
+                    $b = $c.Bounds
+                    $txt = ''
+                    try { if ($c.Text) { $txt = ($c.Text -replace "`r?`n", ' '); if ($txt.Length -gt 28) { $txt = $txt.Substring(0,28) } } } catch { }
+                    $lines += ("  {0,-18} x={1,3} y={2,3} w={3,3} h={4,3}  bottom={5,3}  {6}" -f $c.GetType().Name, $b.X, $b.Y, $b.Width, $b.Height, ($b.Y + $b.Height), $txt)
+                    if (($b.Y + $b.Height) -gt $maxB) { $maxB = $b.Y + $b.Height }
+                }
+                $lines += ("  MAX_BOTTOM={0}  PAGE_HEIGHT={1}  OVERFLOW={2}" -f $maxB, $pg.ClientSize.Height, ($maxB -gt $pg.ClientSize.Height))
+            }
+            Set-Content -Path $env:GTA6_LAUNCHER_LAYOUTTEST -Value ($lines -join "`r`n") -Encoding UTF8
+        } catch { Set-Content -Path $env:GTA6_LAUNCHER_LAYOUTTEST -Value ("ERR " + $_.Exception.Message) -Encoding UTF8 }
+        $form.Close()
+    }
     if ($env:GTA6_LAUNCHER_CRASHTEST) {
         try {
             New-Item -ItemType Directory -Force -Path $script:logDir | Out-Null
@@ -1727,7 +1797,7 @@ $form.Add_Shown({
         $dumpTimer.Interval = 20000
         $dumpTimer.Add_Tick({
             $this.Stop()
-            try { Set-Content -Path $env:GTA6_LAUNCHER_RACEDUMP -Value ("updated=" + $lblRaceUpdated.Text + "`r`nrec=`r`n" + $lblRaceRec.Text) -Encoding UTF8 } catch { }
+            try { Set-Content -Path $env:GTA6_LAUNCHER_RACEDUMP -Value ("updated=" + $lblRaceUpdated.Text + "`r`nrec=`r`n" + ((@($lstRec.Items) -join "`r`n") + "`r`n" + $lblLocalBuilds.Text)) -Encoding UTF8 } catch { }
             $form.Close()
         })
         $dumpTimer.Start()
@@ -1740,7 +1810,7 @@ $form.Add_Shown({
         $outLines += "--- race rows ---"
         $outLines += @($lstRace.Items | Select-Object -First 6)
         $outLines += "--- recommendation ---"
-        $outLines += $lblRaceRec.Text
+        $outLines += @($lstRec.Items)
         Set-Content -Path $env:GTA6_LAUNCHER_RACETEST -Value ($outLines -join "`r`n") -Encoding UTF8
     } catch { }
     $form.Close()
@@ -1774,5 +1844,5 @@ if ($env:GTA6_LAUNCHER_CHECKUPDATE) {
 
 $lblAuthor = New-Label '作者: DKTTT (github.com/DKTTT)  ·  基于 VIctory 社区项目 (avatarmanz / trustno1-coder / fxceless / codec-d)  ·  v1.0' 16 776 1012 20 8.5 $Muted
 $form.Controls.Add($lblAuthor)
-Add-Log 'GTA VI 自动启动器 v1.6 by DKTTT'
+Add-Log 'GTA VI 自动启动器 v1.7 by DKTTT'
 [void]$form.ShowDialog()
