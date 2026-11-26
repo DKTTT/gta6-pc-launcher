@@ -256,3 +256,14 @@ releaseAssets=0 → 自动转源码 ZIP
   - 两个产物执行 `--version` 均输出 `victory 0.1.0`
 - submodule 仓库：LooperSalty/AnyXboxX clone --recursive 成功（third_party/tombox 1616 文件）
 - 异步编译实测：90 秒长编译期间界面定时器 tick 持续（elapsed 1→90），状态栏实时刷新
+
+## [v1.9.0] - 2026-11-26
+
+### 修复
+- **legacy 包「有声音没画面」**：bat 里 `VICTORY_RESOLUTION`/`CARD_BUFFERS_MB` 写在 `victory.exe run` 之后不生效；启动器现在按构建能力补 env（legacy 用 `VICTORY_RESOLUTION`，新构建用 `RENDER_SCALE`），并统一 `VICTORY_WINDOW_PERCENT=88` 防止窗口盖满屏幕黑屏。
+- Build-Env 切换构建时清理残留 env（避免 legacy→新构建残留 RESOLUTION）。
+- 重打包 legacy 包（bat 顺序已修，原 zip 留 .bak）与 20261126b 包。
+
+### 验证
+- ENVDUMP 实测：legacy 构建 → `RESOLUTION=960x540 WINDOW_PERCENT=88`；新构建 → `RENDER_SCALE=0.5 WINDOW_PERCENT=88`
+- bat 顺序验证：`set` 行（22-24）在 `victory.exe run`（25）之前

@@ -258,3 +258,18 @@ status=编译中… 01:30 | Compiling xma v0.1.0 (third_party/tombox/crates/comp
 两个产物均验证可执行：`victory 0.1.0`。
 
 **新增 submodule 支持**：源码 ZIP 不含 git 子模块内容（如 AnyXboxX 的 `third_party/tombox`）；现在检测到 `.gitmodules` 自动改用 `git clone --recursive --depth 1`，实测克隆成功（tombox 1616 个文件）。
+
+## v1.9.0：修复 legacy 包「有声音没画面」+ 按构建能力补 env
+
+**根因**（用户日志与包对照确认）：
+- legacy 包 `start-8gb.bat` 把 `set VICTORY_RESOLUTION=1920x1080` / `VICTORY_CARD_BUFFERS_MB` 写在 `victory.exe run` **之后**（且在 pause 后）→ 永远不生效
+- 标题按 3840×2160 出画，窗口 fit 到约 1848×1040 几乎盖满屏幕 → flip chain/DWM 合成失败 → **黑屏/白屏，但音频正常**
+
+**修复**：
+- 启动器 Build-Env 现在按构建能力自动选画面方案：
+  - 新构建（exe 含 `VICTORY_RENDER_SCALE`）→ `RENDER_SCALE` + `OWN_UPSCALER` + `COMPOSE`
+  - legacy 构建（不含）→ `VICTORY_RESOLUTION=<宽>x<高>` + `CARD_BUFFERS_MB=1024`，不再设无效的 RENDER_SCALE
+- 所有构建统一 `VICTORY_WINDOW_PERCENT=88`（避免窗口盖满屏幕触发 flip chain 黑屏）
+- 日志会打印「构建类型: 新构建/legacy」和实际 env，便于排查
+- 已修复 legacy 包 bat 顺序并重打包：`legacy-GTA6-VIctory-8GB-20261125.zip`、`legacy-GTA6-VIctory-12GBplus-20261125.zip`（原文件已留 .bak）
+- 新出 `20261126b` 分发包：`GTA6-VIctoryPerf-8GB-20261126b.zip`、`GTA6-VIctoryPerf-12GBplus-20261126b.zip`

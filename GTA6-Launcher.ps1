@@ -640,6 +640,19 @@ function Select-Build {
 }
 
 # ---------------------------------------------------------------- 环境与启动
+$script:exeCapCache = @{}
+function Test-BuildSupportsRenderScale([string]$exePath) {
+    try {
+        if (-not $exePath -or -not (Test-Path $exePath)) { return $false }
+        if ($script:exeCapCache.ContainsKey($exePath)) { return $script:exeCapCache[$exePath] }
+        $bytes = [System.IO.File]::ReadAllBytes($exePath)
+        $text = [System.Text.Encoding]::ASCII.GetString($bytes)
+        $supports = $text.Contains('VICTORY_RENDER_SCALE')
+        $script:exeCapCache[$exePath] = $supports
+        return $supports
+    } catch { return $false }
+}
+
 function Build-Env {
     $b = $script:builds[$lstBuilds.SelectedIndex]
     $rec = $script:rec
@@ -664,11 +677,27 @@ function Build-Env {
     $env:VICTORY_TITLE_PRIORITIES = '0'; $env:VICTORY_CARD_AWAKE = '1'; $env:VICTORY_SHOW_AFTER = '1'
     $env:VICTORY_PIPELINE_WAIT_MS = '10000'; $env:VICTORY_DYNAMIC_SLOTS = '524288'
     $env:VICTORY_CARD_BUFFERS_MIN_MB = '1'; $env:VICTORY_CARD_BUFFERS_MB = '1536'
-    $env:VICTORY_RENDER_SCALE = [string]$scale
-    $env:VICTORY_OWN_UPSCALER = '1'
-    $env:VICTORY_COMPOSE = '1'
+    Remove-Item Env:VICTORY_RESOLUTION,Env:VICTORY_RENDER_SCALE -EA SilentlyContinue
+    # 窗口大小：不要盖满屏幕（否则 flip chain 黑屏），所有构建统一 88%
+    $env:VICTORY_WINDOW_PERCENT = '88'
+    # 按构建能力选择画面缩放方式
+    $supportsScale = Test-BuildSupportsRenderScale $b.Exe
+    if ($supportsScale) {
+        $env:VICTORY_RENDER_SCALE = [string]$scale
+        $env:VICTORY_OWN_UPSCALER = '1'
+        $env:VICTORY_COMPOSE = '1'
+        Add-Log ("构建类型: 新构建（支持 RENDER_SCALE）→ VICTORY_RENDER_SCALE={0}, WINDOW_PERCENT=88" -f $scale)
+    } else {
+        Remove-Item Env:VICTORY_RENDER_SCALE -EA SilentlyContinue
+        $legacyW = [math]::Round($height * 16 / 9 / 2) * 2
+        if ($legacyW -lt 320) { $legacyW = 320 }
+        $env:VICTORY_RESOLUTION = ("{0}x{1}" -f $legacyW, $height)
+        if (-not $env:VICTORY_CARD_BUFFERS_MB) { $env:VICTORY_CARD_BUFFERS_MB = '1024' }
+        Add-Log ("构建类型: legacy（不支持 RENDER_SCALE）→ VICTORY_RESOLUTION={0}x{1}, WINDOW_PERCENT=88, CARD_BUFFERS_MB=1024" -f $legacyW, $height)
+        Add-Log '提示：legacy 构建建议改用 20261126b 包；若黑屏/白屏请先试这个包'
+    }
     try { if (Test-Path $script:skipFile) { $env:VICTORY_SKIP_PIPELINES = (Get-Content $script:skipFile -Raw).Trim() } } catch { }
-    return @{ Console = $console; Height = $height; Scale = $scale }
+    return @{ Console = $console; Height = $height; Scale = $scale; Legacy = (-not $supportsScale) }
 }
 
 function Start-Warm([string]$kind) {
@@ -1938,6 +1967,21 @@ $form.Add_Shown({
         })
         $at.Start()
     }
+    if ($env:GTA6_LAUNCHER_ENVDUMP) {
+        try {
+            $outLines = @()
+            for ($bi = 0; $bi -lt $script:builds.Count; $bi++) {
+                $lstBuilds.SelectedIndex = $bi
+                Start-Sleep -Milliseconds 150
+                $null = Build-Env
+                $outLines += ("build={0} exe={1}" -f $script:builds[$bi].Name, $script:builds[$bi].Exe)
+                $outLines += ("  supportsScale={0}" -f (Test-BuildSupportsRenderScale $script:builds[$bi].Exe))
+                $outLines += ("  RENDER_SCALE={0} RESOLUTION={1} WINDOW_PERCENT={2} CARD_BUFFERS_MB={3}" -f $env:VICTORY_RENDER_SCALE, $env:VICTORY_RESOLUTION, $env:VICTORY_WINDOW_PERCENT, $env:VICTORY_CARD_BUFFERS_MB)
+            }
+            Set-Content -Path $env:GTA6_LAUNCHER_ENVDUMP -Value ($outLines -join "`r`n") -Encoding UTF8
+        } catch { Set-Content -Path $env:GTA6_LAUNCHER_ENVDUMP -Value ("ERR " + $_.Exception.Message) -Encoding UTF8 }
+        $form.Close()
+    }
     if ($env:GTA6_LAUNCHER_LAYOUTTEST) {
         try {
             $lines = @()
@@ -2136,5 +2180,5 @@ if ($env:GTA6_LAUNCHER_CHECKUPDATE) {
 
 $lblAuthor = New-Label '作者: DKTTT (github.com/DKTTT)  ·  基于 VIctory 社区项目 (avatarmanz / trustno1-coder / fxceless / codec-d)  ·  v1.0' 16 776 1012 20 8.5 $Muted
 $form.Controls.Add($lblAuthor)
-Add-Log 'GTA VI 自动启动器 v1.8.1 by DKTTT'
+Add-Log 'GTA VI 自动启动器 v1.9.0 by DKTTT'
 [void]$form.ShowDialog()
