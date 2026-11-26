@@ -118,7 +118,7 @@ $Green = [System.Drawing.Color]::FromArgb(46, 160, 100)
 
 $form = New-Object System.Windows.Forms.Form
 $form.Text = 'GTA VI PC 移植 - 自动启动器'
-$form.Size = New-Object System.Drawing.Size(1060, 820)
+$form.Size = New-Object System.Drawing.Size(1120, 900)
 $form.StartPosition = 'CenterScreen'
 $form.BackColor = $Bg
 $form.ForeColor = $TextCol
@@ -168,7 +168,7 @@ $form.Controls.Add($lblSub)
 # Tab
 $tabs = New-Object System.Windows.Forms.TabControl
 $tabs.Location = New-Object System.Drawing.Point(16, 72)
-$tabs.Size = New-Object System.Drawing.Size(1012, 520)
+$tabs.Size = New-Object System.Drawing.Size(1072, 600)
 $tabs.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 9.5)
 $form.Controls.Add($tabs)
 $tabHw = New-Object System.Windows.Forms.TabPage
@@ -314,19 +314,20 @@ $tabRun.Controls.Add($chkOpenDir)
 $tabRace.Controls.Add((New-Label 'GTA VI PC Race 排行榜（每次启动自动更新）' 14 12 500 22 10))
 $lblRaceUpdated = New-Label '尚未更新' 500 12 470 22 9 $Muted
 $tabRace.Controls.Add($lblRaceUpdated)
-$txtRace = New-Object System.Windows.Forms.TextBox
-$txtRace.Location = New-Object System.Drawing.Point(14, 40)
-$txtRace.Size = New-Object System.Drawing.Size(960, 300)
-$txtRace.Multiline = $true; $txtRace.ReadOnly = $true; $txtRace.ScrollBars = 'Vertical'
-$txtRace.BackColor = [System.Drawing.Color]::FromArgb(16, 12, 28); $txtRace.ForeColor = $TextCol
-$txtRace.Font = New-Object System.Drawing.Font('Consolas', 9)
-$tabRace.Controls.Add($txtRace)
-$btnRaceNow = New-Btn '立即刷新排名' 14 350 160 32
-$tabRace.Controls.Add($btnRaceNow)
-$lblRaceSrc = New-Label '数据源: vuyp.github.io/gta6-pc-race（启动时自动拉取）' 190 356 500 22 9 $Muted
+$lstRace = New-Object System.Windows.Forms.ListBox
+$lstRace.Location = New-Object System.Drawing.Point(14, 40)
+$lstRace.Size = New-Object System.Drawing.Size(1030, 300)
+$lstRace.BackColor = [System.Drawing.Color]::FromArgb(16, 12, 28); $lstRace.ForeColor = $TextCol
+$lstRace.Font = New-Object System.Drawing.Font('Consolas', 9)
+$lstRace.HorizontalScrollbar = $true
+$tabRace.Controls.Add($lstRace)
+$btnRaceNow = New-Btn '立即刷新排名' 14 350 150 32
+$btnRacePull = New-Btn '拉取选中项目构建' 174 350 180 32 $Green
+$lblRaceSrc = New-Label '数据源: vuyp.github.io/gta6-pc-race（启动时自动拉取；双击列表行也可拉取）' 364 356 620 22 9 $Muted
+$tabRace.Controls.Add($btnRaceNow); $tabRace.Controls.Add($btnRacePull)
 $tabRace.Controls.Add($lblRaceSrc)
 $tabRace.Controls.Add((New-Label '为本机推荐（按显卡/显存/速度/稳定性匹配）' 14 392 500 22 10))
-$lblRaceRec = New-Label '等待更新…' 14 418 960 100 9 $Green
+$lblRaceRec = New-Label '等待更新…' 14 418 1030 150 9 $Green
 $tabRace.Controls.Add($lblRaceRec)
 
 # ---------------- Tab5: 键盘映射 ----------------
@@ -352,9 +353,9 @@ $chkKeyAuto.Location = New-Object System.Drawing.Point(14, 390)
 $chkKeyAuto.Size = New-Object System.Drawing.Size(260, 24)
 $chkKeyAuto.ForeColor = $TextCol; $chkKeyAuto.BackColor = $Bg; $chkKeyAuto.Checked = $true
 $tabKeys.Controls.Add($chkKeyAuto)
-$tabKeys.Controls.Add((New-Label '说明：只在游戏窗口聚焦时生效；Ctrl+Alt+M 随时开/关；停止启动器自动卸载。' 14 392 960 22 9 $Muted))
+$tabKeys.Controls.Add((New-Label '说明：只在游戏窗口聚焦时生效；Ctrl+Alt+M 随时开/关；停止启动器自动卸载。' 14 418 1000 22 9 $Muted))
 $txtKeyLast = New-Object System.Windows.Forms.TextBox
-$txtKeyLast.Location = New-Object System.Drawing.Point(14, 422)
+$txtKeyLast.Location = New-Object System.Drawing.Point(14, 448)
 $txtKeyLast.Size = New-Object System.Drawing.Size(960, 26)
 $txtKeyLast.ReadOnly = $true
 $txtKeyLast.BackColor = [System.Drawing.Color]::FromArgb(16, 12, 28); $txtKeyLast.ForeColor = $TextCol
@@ -363,8 +364,8 @@ $tabKeys.Controls.Add($txtKeyLast)
 
 # 日志
 $logBox = New-Object System.Windows.Forms.TextBox
-$logBox.Location = New-Object System.Drawing.Point(16, 600)
-$logBox.Size = New-Object System.Drawing.Size(1012, 170)
+$logBox.Location = New-Object System.Drawing.Point(16, 684)
+$logBox.Size = New-Object System.Drawing.Size(1072, 180)
 $logBox.Multiline = $true; $logBox.ReadOnly = $true; $logBox.ScrollBars = 'Vertical'
 $logBox.BackColor = [System.Drawing.Color]::FromArgb(14, 10, 24); $logBox.ForeColor = [System.Drawing.Color]::FromArgb(190, 190, 210)
 $logBox.Font = New-Object System.Drawing.Font('Consolas', 9)
@@ -386,6 +387,7 @@ $script:autoStage = 0
 $script:race = $null
 $script:raceRec = $null
 $script:mapperWanted = $false
+$script:raceList = @()
 $script:raceCache = Join-Path $Root 'race-cache.json'
 $script:outLog = Join-Path $env:TEMP 'gta6-launcher-warm.out.log'
 $script:errLog = Join-Path $env:TEMP 'gta6-launcher-warm.err.log'
@@ -989,8 +991,14 @@ function Update-Race {
             $rows += '--- 关注中（尚无阶段）---'
             foreach ($w in @($data.watching | Select-Object -First 8)) { $rows += ("    {0}  {1}" -f $w.name, $w.repo) }
         }
-        $txtRace.Text = $rows -join "`r`n"
-        $lblRaceUpdated.Text = ("数据时间: {0}" -f $data.checked)
+        $lstRace.Items.Clear()
+        $script:raceList = @()
+        foreach ($p in @($data.projects | Sort-Object pos | Select-Object -First 25)) {
+            $repoTxt = if ($p.repo) { $p.repo } else { '(无公开代码)' }
+            $lstRace.Items.Add(("{0,2}. {1,-22} st{2}  画面{3}/5 速度{4}/6 稳定{5}/4   {6}" -f $p.pos, $p.name, $p.stage, (LaneStep $p.lanes.picture), (SpeedStep $p.lanes.speed), (StabilityStep $p.lanes.stability), $repoTxt)) | Out-Null
+            $script:raceList += $p
+        }
+        $lblRaceUpdated.Text = ("数据时间: {0}（每启动更新；双击行拉取构建）" -f $data.checked)
 
         $scored = Get-RaceRecommendation $data
         if ($scored.Count -gt 0) {
@@ -1049,6 +1057,80 @@ function Update-Race {
         Add-Log ("排行榜处理失败: " + $_.Exception.Message)
         $lblRaceUpdated.Text = '排行榜处理失败'
     }
+}
+
+# ---------------------------------------------------------------- 排行榜拉取构建
+function Get-RaceCompat($p) {
+    $hw = $script:hw
+    if (-not $hw -or -not $p) { return [pscustomobject]@{ Ok = $true; Reasons = @() } }
+    $reasons = @()
+    $gpuTxt = (@($p.tested.gpu) -join ' ')
+    $text = "$($p.status) $($p.kind) $gpuTxt"
+    if ($hw.Vendor -eq 'NVIDIA' -and $gpuTxt -match 'AMD|Radeon' -and $gpuTxt -notmatch 'NVIDIA') { $reasons += '该项目只在 AMD 显卡上测试' }
+    if ($hw.Vendor -eq 'AMD' -and $gpuTxt -match 'NVIDIA' -and $gpuTxt -notmatch 'AMD') { $reasons += '该项目只在 NVIDIA 显卡上测试' }
+    $nums = @()
+    foreach ($pat in 'RTX\s*\d{4}\s*(?:Ti|SUPER)?[^\d]{0,20}?(\d+)\s*GB', 'RX\s*\d{4}\s*(?:XT|XTX)?[^\d]{0,20}?(\d+)\s*GB', '(\d+)\s*GB\s*(?:card|VRAM)') {
+        foreach ($m0 in [regex]::Matches($text, $pat, 'IgnoreCase')) { $nums += [int]$m0.Groups[1].Value }
+    }
+    $nums = @($nums | Where-Object { $_ -ge 4 -and $_ -le 48 } | Sort-Object -Unique)
+    $userGB = [math]::Round($hw.VramMB / 1024, 0)
+    if ($nums.Count -gt 0 -and $userGB -gt 0) {
+        $minNeeded = ($nums | Measure-Object -Minimum).Minimum
+        if ($minNeeded -gt ($userGB + 2)) { $reasons += ("测试用显存 {0} GB，你的显存 {1} GB" -f $minNeeded, $userGB) }
+    }
+    return [pscustomobject]@{ Ok = ($reasons.Count -eq 0); Reasons = $reasons }
+}
+
+function Pull-RaceBuild($p) {
+    try {
+        if (-not $p) { Add-Log '先在排行榜列表里选一个项目'; return }
+        if (-not $p.repo) { [System.Windows.Forms.MessageBox]::Show('该项目没有公开仓库（可能已删除/私有），无法拉取。', '无法拉取'); return }
+        $compat = Get-RaceCompat $p
+        if (-not $compat.Ok) {
+            $hw = $script:hw
+            $msg = ("选中项目：{0}（榜上第 {1} 名）`r`n测试硬件：{2}`r`n`r`n可能的适配问题：`r`n  - {3}`r`n`r`n你的配置：{4} / {5} GB 显存 / {6} GB 内存`r`n`r`n仍然继续拉取并构建吗？`r`n  是 = 继续`r`n  否 = 取消" -f $p.name, $p.pos, ((@($p.tested.gpu) -join ', ')), ($compat.Reasons -join "`r`n  - "), $hw.Vendor, [math]::Round($hw.VramMB/1024,0), $hw.RamGB)
+            $r = [System.Windows.Forms.MessageBox]::Show($msg, '配置可能不适配', 'YesNo', 'Warning')
+            if ($r -ne 'Yes') { Add-Log ("已取消拉取 {0}（配置不适配）" -f $p.name); return }
+        }
+        $choice = [System.Windows.Forms.MessageBox]::Show(("拉取 {0}：`r`n{1}`r`n`r`n  是 = 下载源码并编译`r`n  否 = 只下载源码 ZIP`r`n  取消 = 不拉取" -f $p.name, $p.repo), '拉取构建', 'YesNoCancel', 'Question')
+        if ($choice -eq 'Cancel') { return }
+        $branch = 'main'
+        try {
+            $info = Invoke-RestMethod -Uri "https://api.github.com/repos/$($p.repo)" -Headers @{ 'User-Agent' = 'gta6-launcher' } -TimeoutSec 20
+            if ($info.default_branch) { $branch = $info.default_branch }
+        } catch { }
+        $dest = $tbDlDir.Text.Trim()
+        Add-Log ("拉取 {0} @ {1} → {2}" -f $p.repo, $branch, $dest)
+        Download-FromGitHub $p.repo $branch $dest
+        if ($choice -eq 'Yes') {
+            $zipName = ($p.repo -replace '/', '_') + "-$branch.zip"
+            $extract = Join-Path $dest ([System.IO.Path]::GetFileNameWithoutExtension($zipName))
+            if (-not (Test-Path $extract)) { Add-Log '未找到解压目录，无法编译'; return }
+            $proj = Get-ChildItem $extract -Directory -EA SilentlyContinue | Where-Object { Test-Path (Join-Path $_.FullName 'Cargo.toml') } | Select-Object -First 1
+            $root = if ($proj) { $proj.FullName } else { $extract }
+            if (-not (Test-Path (Join-Path $root 'Cargo.toml'))) { Add-Log '未找到 Cargo.toml，跳过编译'; return }
+            if (-not (Get-Command cargo -EA SilentlyContinue)) { Add-Log '没有 cargo，跳过编译（可自行编译）'; return }
+            Add-Log ("开始编译（可能几分钟）: {0}" -f $root)
+            $bLog = Join-Path $env:TEMP ("gta6-race-build-" + [System.IO.Path]::GetFileName($root) + ".log")
+            Remove-Item $bLog -EA SilentlyContinue
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName = 'cargo'
+            $psi.Arguments = 'build --profile diag -p victory --features diagnostics'
+            $psi.WorkingDirectory = $root
+            $psi.UseShellExecute = $false
+            $psi.RedirectStandardOutput = $true
+            $psi.RedirectStandardError = $true
+            $psi.CreateNoWindow = $true
+            $bp = [System.Diagnostics.Process]::Start($psi)
+            $out = $bp.StandardOutput.ReadToEnd() + "`r`n" + $bp.StandardError.ReadToEnd()
+            $bp.WaitForExit()
+            Set-Content -Path $bLog -Value $out -Encoding UTF8
+            $tail = ($out -split "`r?`n" | Where-Object { $_ } | Select-Object -Last 5) -join ' | '
+            Add-Log ("编译结束: " + $tail)
+            Start-Sleep -Milliseconds 500
+            Scan-Builds
+        }
+    } catch { Add-Log ("拉取构建失败: " + $_.Exception.Message) }
 }
 
 # ---------------------------------------------------------------- 键盘映射
@@ -1131,6 +1213,7 @@ function Stop-Mapper {
     try {
         if ('KeyMap' -as [type]) { [KeyMap]::Uninstall() }
         $script:mapperWanted = $false
+$script:raceList = @()
         $lblKeyStatus.Text = '映射已停止'
         Add-Log '键盘映射已停止'
     } catch { }
@@ -1148,6 +1231,13 @@ foreach ($b in $btnBrowse) {
 }
 $btnScan.Add_Click({ Scan-Builds })
 $btnRaceNow.Add_Click({ Update-Race })
+$btnRacePull.Add_Click({
+    if ($lstRace.SelectedIndex -ge 0 -and $script:raceList) { Pull-RaceBuild $script:raceList[$lstRace.SelectedIndex] }
+    else { Add-Log '先在排行榜列表里点选一个项目' }
+})
+$lstRace.Add_DoubleClick({
+    if ($lstRace.SelectedIndex -ge 0 -and $script:raceList) { Pull-RaceBuild $script:raceList[$lstRace.SelectedIndex] }
+})
 $btnKeyStart.Add_Click({ Start-Mapper })
 $btnKeyStop.Add_Click({ Stop-Mapper })
 $btnKeySave.Add_Click({ Save-Cfg; try { $r = Parse-KeyMap; Add-Log ("映射已保存：{0} 条（{1} 个错误）" -f $r.Map.Count, $r.Errors.Count) } catch { } })
@@ -1211,6 +1301,23 @@ $form.Add_Shown({
     $raceTimer.Interval = 1500
     $raceTimer.Add_Tick({ $this.Stop(); try { Update-Race } catch { } })
     $raceTimer.Start()
+    if ($env:GTA6_LAUNCHER_COMPATTEST) {
+        try {
+            Update-Race
+            $lines = @()
+            $lines += "raceItems=" + $lstRace.Items.Count
+            $lines += "raceList=" + $script:raceList.Count
+            $lines += "firstRow=" + $lstRace.Items[0]
+            $i = 0
+            foreach ($p in @($script:raceList | Select-Object -First 6)) {
+                $c = Get-RaceCompat $p
+                $lines += ("compat: {0} -> ok={1} reasons={2}" -f $p.name, $c.Ok, ($c.Reasons -join '/'))
+                $i++
+            }
+            Set-Content -Path $env:GTA6_LAUNCHER_COMPATTEST -Value ($lines -join "`r`n") -Encoding UTF8
+        } catch { Set-Content -Path $env:GTA6_LAUNCHER_COMPATTEST -Value ("ERR " + $_.Exception.Message) -Encoding UTF8 }
+        $form.Close()
+    }
     if ($env:GTA6_LAUNCHER_KEYTEST) {
         try {
             $txtKeyMap.Text = "CapsLock = Escape`r`nF1 = Tab`r`nW = Up`r`n# 注释行会被忽略"
@@ -1305,7 +1412,7 @@ $form.Add_Shown({
         $outLines = @()
         $outLines += "updated=" + $lblRaceUpdated.Text
         $outLines += "--- race rows ---"
-        $outLines += ($txtRace.Text -split "`r?`n" | Select-Object -First 6)
+        $outLines += @($lstRace.Items | Select-Object -First 6)
         $outLines += "--- recommendation ---"
         $outLines += $lblRaceRec.Text
         Set-Content -Path $env:GTA6_LAUNCHER_RACETEST -Value ($outLines -join "`r`n") -Encoding UTF8
@@ -1341,5 +1448,5 @@ if ($env:GTA6_LAUNCHER_CHECKUPDATE) {
 
 $lblAuthor = New-Label '作者: DKTTT (github.com/DKTTT)  ·  基于 VIctory 社区项目 (avatarmanz / trustno1-coder / fxceless / codec-d)  ·  v1.0' 16 776 1012 20 8.5 $Muted
 $form.Controls.Add($lblAuthor)
-Add-Log 'GTA VI 自动启动器 v1.3.1 by DKTTT'
+Add-Log 'GTA VI 自动启动器 v1.4 by DKTTT'
 [void]$form.ShowDialog()
