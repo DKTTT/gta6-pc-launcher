@@ -1,0 +1,1166 @@
+﻿# GTA VI PC 移植 - 自动检测启动器 v1.0
+# 功能：检测硬件 -> 推荐构建与画质；自定义路径；从 GitHub 下载构建；预热；启动
+# 运行：双击同目录 GTA6-Launcher.bat
+
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+
+# 单实例
+$script:mutex = New-Object System.Threading.Mutex($false, 'Global\GTA6AutoLauncher')
+if (-not $script:mutex.WaitOne(0)) {
+    [System.Windows.Forms.MessageBox]::Show('启动器已经在运行了。', 'GTA VI 启动器')
+    exit
+}
+
+$ErrorActionPreference = 'Continue'
+$Root = Split-Path -Parent $MyInvocation.MyCommand.Path
+$ConfigPath = Join-Path $Root 'launcher-config.json'
+
+# ---------------------------------------------------------------- 配置
+$DefaultCfg = @{
+    GameDir   = 'E:\GTA6.Xbox.v1.0.2.1-CYBERLEEK'
+    BuildRoot = 'E:\gta6\work'
+    CacheRoot = 'E:\gta6'
+    SaveRoot  = 'E:\gta6\work'
+    Repo      = 'DKTTT/victory-nvidia-8gb'
+    Branch    = 'tools-and-patches'
+    Console   = 'auto'
+    Height    = 'auto'
+    Build     = 'auto'
+    Preset    = 'auto'
+    RaceUrl   = 'https://vuyp.github.io/gta6-pc-race/src/data.json'
+}
+$Cfg = $DefaultCfg.Clone()
+if (Test-Path $ConfigPath) {
+    try {
+        $loaded = Get-Content $ConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        foreach ($k in @($loaded.PSObject.Properties.Name)) { if ($Cfg.ContainsKey($k)) { $Cfg[$k] = $loaded.$k } }
+    } catch { }
+}
+function Save-Cfg {
+    try {
+        $Cfg.GameDir = $tbGame.Text.Trim()
+        $Cfg.BuildRoot = $tbBuildRoot.Text.Trim()
+        $Cfg.CacheRoot = $tbCacheRoot.Text.Trim()
+        $Cfg.SaveRoot = $tbSaveRoot.Text.Trim()
+        $Cfg.Repo = $tbRepo.Text.Trim()
+        $Cfg.Branch = $tbBranch.Text.Trim()
+        $Cfg.Console = if ($rbAutoCon.Checked) { 'auto' } elseif ($rbSX.Checked) { 'series-x' } else { 'series-s' }
+        $selH = ($heights | Where-Object { $rbResMap[$_].Checked } | Select-Object -First 1)
+        $Cfg.Height = if ($rbAutoRes.Checked -or -not $selH) { 'auto' } else { "$selH" }
+        $Cfg | ConvertTo-Json -Depth 3 | Set-Content -Path $ConfigPath -Encoding UTF8
+    } catch { }
+}
+
+# ---------------------------------------------------------------- 构建元数据 / 版本检测
+$script:metaPath = Join-Path $Root 'builds-meta.json'
+function Get-Meta {
+    if (-not (Test-Path $script:metaPath)) { return @{} }
+    try {
+        $raw = Get-Content $script:metaPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $h = @{}
+        foreach ($p in $raw.PSObject.Properties) { $h[$p.Name] = $p.Value }
+        return $h
+    } catch { return @{} }
+}
+function Save-Meta($m) { try { $m | ConvertTo-Json -Depth 6 | Set-Content -Path $script:metaPath -Encoding UTF8 } catch { } }
+function Get-ProjectInfo([string]$proj) {
+    $info = [pscustomobject]@{ Project = $proj; Git = $false; Commit = ''; Branch = ''; Remote = ''; Translator = '' }
+    if (Test-Path (Join-Path $proj '.git')) {
+        $info.Git = $true
+        try { $info.Commit = (& git -C $proj rev-parse --short HEAD 2>$null | Select-Object -First 1) } catch { }
+        try { $info.Branch = (& git -C $proj rev-parse --abbrev-ref HEAD 2>$null | Select-Object -First 1) } catch { }
+        try { $info.Remote = (& git -C $proj remote get-url origin 2>$null | Select-Object -First 1) } catch { }
+    }
+    $lib = Join-Path $proj 'crates\victory-shader\src\lib.rs'
+    if (Test-Path $lib) {
+        try {
+            $m = Select-String -Path $lib -Pattern 'TRANSLATOR_VERSION: u32 = (\d+)' | Select-Object -First 1
+            if ($m) { $info.Translator = $m.Matches[0].Groups[1].Value }
+        } catch { }
+    }
+    return $info
+}
+function Get-CacheState([string]$proj, [datetime]$exeTime, [string]$translator, [string]$cacheDir) {
+    $meta = Get-Meta
+    $m = $meta[$proj]
+    $warmDone = Join-Path $cacheDir 'pipelines\warm-done.txt'
+    if (-not $m) {
+        # 无启动器记录：看缓存目录里有没有已有的预热结果
+        if ((Test-Path $warmDone) -and ((Get-Item $warmDone).Length -gt 0)) {
+            $wt = (Get-Item $warmDone).LastWriteTime
+            if ($exeTime -gt $wt) {
+                return [pscustomobject]@{ State = 'stale'; Text = "⚠ 构建比缓存新（缓存 {0:MM-dd HH:mm}），建议重新「全部预热」" -f $wt }
+            }
+            return [pscustomobject]@{ State = 'ok'; Text = ("检测到已有管线缓存（{0:MM-dd HH:mm}）" -f $wt) }
+        }
+        return [pscustomobject]@{ State = 'never'; Text = '从未预热过，首次启动前必须预热' }
+    }
+    $stale = $false
+    if ($m.prewarmTime) { try { if ($exeTime -gt [datetime]$m.prewarmTime) { $stale = $true } } catch { } }
+    if ($m.translator -and $translator -and ("$($m.translator)" -ne "$translator")) { $stale = $true }
+    if (-not $m.prewarmTime) { $stale = $true }
+    if ($stale) { return [pscustomobject]@{ State = 'stale'; Text = '⚠ 构建比上次预热新（或翻译器版本变了），建议重新「全部预热」' } }
+    return [pscustomobject]@{ State = 'ok'; Text = "缓存新鲜（上次预热 $($m.prewarmTime)）" }
+}
+
+# ---------------------------------------------------------------- 界面
+$Bg = [System.Drawing.Color]::FromArgb(24, 20, 40)
+$Panel = [System.Drawing.Color]::FromArgb(38, 30, 64)
+$Accent = [System.Drawing.Color]::FromArgb(230, 70, 90)
+$TextCol = [System.Drawing.Color]::FromArgb(235, 235, 245)
+$Muted = [System.Drawing.Color]::FromArgb(150, 150, 175)
+$Green = [System.Drawing.Color]::FromArgb(46, 160, 100)
+
+$form = New-Object System.Windows.Forms.Form
+$form.Text = 'GTA VI PC 移植 - 自动启动器'
+$form.Size = New-Object System.Drawing.Size(1060, 820)
+$form.StartPosition = 'CenterScreen'
+$form.BackColor = $Bg
+$form.ForeColor = $TextCol
+$form.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 9.5)
+$form.FormBorderStyle = 'FixedSingle'
+$form.MaximizeBox = $false
+
+function New-Label([string]$text, [int]$x, [int]$y, [int]$w, [int]$h, [int]$size = 9, [System.Drawing.Color]$color = $TextCol) {
+    $l = New-Object System.Windows.Forms.Label
+    $l.Text = $text; $l.Location = New-Object System.Drawing.Point($x, $y)
+    $l.Size = New-Object System.Drawing.Size($w, $h)
+    $l.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', $size)
+    $l.ForeColor = $color; $l.BackColor = [System.Drawing.Color]::Transparent
+    return $l
+}
+function New-Btn([string]$text, [int]$x, [int]$y, [int]$w, [int]$h, [System.Drawing.Color]$color = $Panel) {
+    $b = New-Object System.Windows.Forms.Button
+    $b.Text = $text; $b.Location = New-Object System.Drawing.Point($x, $y)
+    $b.Size = New-Object System.Drawing.Size($w, $h)
+    $b.FlatStyle = 'Flat'; $b.BackColor = $color; $b.ForeColor = $TextCol
+    return $b
+}
+function New-Tb([string]$text, [int]$x, [int]$y, [int]$w) {
+    $t = New-Object System.Windows.Forms.TextBox
+    $t.Location = New-Object System.Drawing.Point($x, $y)
+    $t.Size = New-Object System.Drawing.Size($w, 26)
+    $t.BackColor = $Panel; $t.ForeColor = $TextCol; $t.BorderStyle = 'FixedSingle'
+    $t.Text = $text
+    return $t
+}
+function New-Radio([string]$text, [int]$x, [int]$y, [int]$w, [bool]$checked, $parent) {
+    $r = New-Object System.Windows.Forms.RadioButton
+    $r.Text = $text; $r.Location = New-Object System.Drawing.Point($x, $y)
+    $r.Size = New-Object System.Drawing.Size($w, 24)
+    $r.FlatStyle = 'Flat'; $r.ForeColor = $TextCol; $r.BackColor = $Bg
+    $r.Checked = $checked
+    $parent.Controls.Add($r)
+    return $r
+}
+
+# 标题
+$lblTitle = New-Label 'GTA VI PC 移植 · 自动启动器' 20 12 500 32 16 $Accent
+$form.Controls.Add($lblTitle)
+$lblSub = New-Label '自动检测硬件并推荐配置 · 支持自定义目录 · 支持从 GitHub 拉取构建' 20 44 800 22 9 $Muted
+$form.Controls.Add($lblSub)
+
+# Tab
+$tabs = New-Object System.Windows.Forms.TabControl
+$tabs.Location = New-Object System.Drawing.Point(16, 72)
+$tabs.Size = New-Object System.Drawing.Size(1012, 520)
+$tabs.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 9.5)
+$form.Controls.Add($tabs)
+$tabHw = New-Object System.Windows.Forms.TabPage
+$tabHw.Text = '① 设备与配置'; $tabHw.BackColor = $Bg
+$tabBuild = New-Object System.Windows.Forms.TabPage
+$tabBuild.Text = '② 构建与下载'; $tabBuild.BackColor = $Bg
+$tabRun = New-Object System.Windows.Forms.TabPage
+$tabRun.Text = '③ 预热与启动'; $tabRun.BackColor = $Bg
+$tabRace = New-Object System.Windows.Forms.TabPage
+$tabRace.Text = '④ 排行榜与推荐'; $tabRace.BackColor = $Bg
+$tabs.TabPages.Add($tabHw); $tabs.TabPages.Add($tabBuild); $tabs.TabPages.Add($tabRun); $tabs.TabPages.Add($tabRace)
+
+# ---------------- Tab1: 设备与配置 ----------------
+$tabHw.Controls.Add((New-Label '本机硬件（自动检测）' 14 12 400 22 10))
+$txtHw = New-Object System.Windows.Forms.TextBox
+$txtHw.Location = New-Object System.Drawing.Point(14, 38)
+$txtHw.Size = New-Object System.Drawing.Size(960, 150)
+$txtHw.Multiline = $true; $txtHw.ReadOnly = $true; $txtHw.ScrollBars = 'Vertical'
+$txtHw.BackColor = [System.Drawing.Color]::FromArgb(16, 12, 28); $txtHw.ForeColor = $TextCol
+$txtHw.Font = New-Object System.Drawing.Font('Consolas', 9)
+$tabHw.Controls.Add($txtHw)
+$tabHw.Controls.Add((New-Label '推荐配置（可手动覆盖）' 14 196 400 22 10))
+$txtRec = New-Object System.Windows.Forms.TextBox
+$txtRec.Location = New-Object System.Drawing.Point(14, 222)
+$txtRec.Size = New-Object System.Drawing.Size(960, 90)
+$txtRec.Multiline = $true; $txtRec.ReadOnly = $true
+$txtRec.BackColor = [System.Drawing.Color]::FromArgb(16, 12, 28); $txtRec.ForeColor = [System.Drawing.Color]::FromArgb(180, 230, 180)
+$txtRec.Font = New-Object System.Drawing.Font('Consolas', 9)
+$tabHw.Controls.Add($txtRec)
+
+# 路径区
+$tabHw.Controls.Add((New-Label '目录设置' 14 322 200 22 10))
+$labels = @('游戏目录', '构建根目录', '缓存根目录', '存档根目录')
+$defaults = @($Cfg.GameDir, $Cfg.BuildRoot, $Cfg.CacheRoot, $Cfg.SaveRoot)
+$tbPath = @()
+$btnBrowse = @()
+for ($i = 0; $i -lt 4; $i++) {
+    $y = 348 + $i * 34
+    $tabHw.Controls.Add((New-Label $labels[$i] 14 $y 90 22))
+    $t = New-Tb $defaults[$i] 110 $y 760
+    $tabHw.Controls.Add($t); $tbPath += $t
+    $b = New-Btn '浏览…' 880 $y 90 26
+    $b.Tag = $i
+    $tabHw.Controls.Add($b); $btnBrowse += $b
+}
+$tbGame = $tbPath[0]; $tbBuildRoot = $tbPath[1]; $tbCacheRoot = $tbPath[2]; $tbSaveRoot = $tbPath[3]
+
+# 主机模式 + 分辨率 + 预设
+$tabHw.Controls.Add((New-Label '主机模式' 14 494 120 22))
+$panelCon = New-Object System.Windows.Forms.Panel
+$panelCon.Location = New-Object System.Drawing.Point(110, 490); $panelCon.Size = New-Object System.Drawing.Size(300, 26); $panelCon.BackColor = $Bg
+$tabHw.Controls.Add($panelCon)
+$rbAutoCon = New-Radio '自动（按显卡推荐）' 0 0 150 $true $panelCon
+$rbSS = New-Radio 'Series S（快）' 150 0 70 ($Cfg.Console -eq 'series-s') $panelCon
+$rbSX = New-Radio 'Series X（清晰）' 220 0 80 ($Cfg.Console -eq 'series-x') $panelCon
+
+$tabHw.Controls.Add((New-Label '渲染分辨率' 430 494 90 22))
+$panelRes = New-Object System.Windows.Forms.Panel
+$panelRes.Location = New-Object System.Drawing.Point(520, 490); $panelRes.Size = New-Object System.Drawing.Size(460, 26); $panelRes.BackColor = $Bg
+$tabHw.Controls.Add($panelRes)
+$rbAutoRes = New-Radio '自动' 0 0 50 $true $panelRes
+$heights = @(2160, 1440, 1080, 720, 540, 480)
+$rbResMap = @{}
+$x = 52
+foreach ($hgt in $heights) {
+    $r = New-Radio "${hgt}p" $x 0 56 $false $panelRes
+    $rbResMap[$hgt] = $r
+    $x += 58
+}
+
+# ---------------- Tab2: 构建与下载 ----------------
+$tabBuild.Controls.Add((New-Label '本地构建（自动扫描构建根目录）' 14 12 500 22 10))
+$lstBuilds = New-Object System.Windows.Forms.ListBox
+$lstBuilds.Location = New-Object System.Drawing.Point(14, 38)
+$lstBuilds.Size = New-Object System.Drawing.Size(960, 150)
+$lstBuilds.BackColor = [System.Drawing.Color]::FromArgb(16, 12, 28); $lstBuilds.ForeColor = $TextCol
+$lstBuilds.Font = New-Object System.Drawing.Font('Consolas', 9)
+$tabBuild.Controls.Add($lstBuilds)
+$btnScan = New-Btn '重新扫描本地构建' 14 196 180 30
+$tabBuild.Controls.Add($btnScan)
+$lblBuildInfo = New-Label '' 210 200 740 22 9 $Muted
+$tabBuild.Controls.Add($lblBuildInfo)
+
+$tabBuild.Controls.Add((New-Label '从 GitHub 下载构建' 14 240 300 22 10))
+$tabBuild.Controls.Add((New-Label '仓库' 14 268 60 22))
+$tbRepo = New-Tb $Cfg.Repo 76 264 300
+$tabBuild.Controls.Add($tbRepo)
+$tabBuild.Controls.Add((New-Label '分支' 392 268 40 22))
+$tbBranch = New-Tb $Cfg.Branch 436 264 180
+$tabBuild.Controls.Add($tbBranch)
+$tabBuild.Controls.Add((New-Label '下载到' 630 268 60 22))
+$tbDlDir = New-Tb (Join-Path $Cfg.BuildRoot 'downloaded') 694 264 270
+$tabBuild.Controls.Add($tbDlDir)
+$btnDlSrc = New-Btn '下载源码 ZIP' 14 300 160 32 $Accent
+$btnDlRel = New-Btn '下载 Release' 184 300 140 32
+$btnCargo = New-Btn '编译选中的源码构建' 334 300 200 32 $Green
+$tabBuild.Controls.Add($btnDlSrc); $tabBuild.Controls.Add($btnDlRel); $tabBuild.Controls.Add($btnCargo)
+$lblDl = New-Label '下载/编译会使用系统代理（墙内需要代理）' 544 306 430 22 9 $Muted
+$tabBuild.Controls.Add($lblDl)
+
+$tabBuild.Controls.Add((New-Label '说明：源码 ZIP 下载后需要编译才能得到 victory.exe；编译需要 Rust 工具链（rustup/cargo）。' 14 344 960 44 9 $Muted))
+$tabBuild.Controls.Add((New-Label '上游更新与回滚（构建需是 git 工程）' 14 390 400 22 10))
+$lblVerInfo = New-Label '未检查' 14 416 700 22 9 $Muted
+$tabBuild.Controls.Add($lblVerInfo)
+$tabBuild.Controls.Add((New-Label '代理' 724 416 40 22))
+$tbProxy = New-Tb 'http://127.0.0.1:7890' 764 412 200
+$tabBuild.Controls.Add($tbProxy)
+$btnCheck = New-Btn '检查上游更新' 14 444 150 32
+$btnUpdate = New-Btn '更新并编译' 174 444 140 32 $Accent
+$btnRollback = New-Btn '回滚上一版本' 324 444 140 32
+$tabBuild.Controls.Add($btnCheck); $tabBuild.Controls.Add($btnUpdate); $tabBuild.Controls.Add($btnRollback)
+$lblKnown = New-Label '已知问题：上游 2026-11-26 的 93 提交版本在 8GB NVIDIA 上实测白屏/崩溃，暂不建议更新；更新前启动器会自动备份旧 exe。' 14 484 960 40 9 $Muted
+$tabBuild.Controls.Add($lblKnown)
+
+# ---------------- Tab3: 预热与启动 ----------------
+$tabRun.Controls.Add((New-Label '预热（首次/更新后执行一次）' 14 12 400 22 10))
+$btnWarmShaders = New-Btn '预热着色器' 14 40 160 38
+$btnWarmPipes = New-Btn '预编译管线' 184 40 160 38
+$btnWarmAll = New-Btn '全部预热' 354 40 160 38 $Accent
+$btnStop = New-Btn '停止' 524 40 100 38
+$tabRun.Controls.Add($btnWarmShaders); $tabRun.Controls.Add($btnWarmPipes); $tabRun.Controls.Add($btnWarmAll); $tabRun.Controls.Add($btnStop)
+
+$progress = New-Object System.Windows.Forms.ProgressBar
+$progress.Location = New-Object System.Drawing.Point(14, 88)
+$progress.Size = New-Object System.Drawing.Size(960, 16)
+$tabRun.Controls.Add($progress)
+$lblStatus = New-Label '就绪' 14 110 960 22 9 $Muted
+$tabRun.Controls.Add($lblStatus)
+
+$btnLaunch = New-Btn '启动游戏' 14 142 960 60 $Green
+$btnLaunch.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 16, [System.Drawing.FontStyle]::Bold)
+$tabRun.Controls.Add($btnLaunch)
+$chkOpenDir = New-Object System.Windows.Forms.CheckBox
+$chkOpenDir.Text = '关闭启动器时一并结束游戏'
+$chkOpenDir.Location = New-Object System.Drawing.Point(14, 214)
+$chkOpenDir.Size = New-Object System.Drawing.Size(300, 24)
+$chkOpenDir.ForeColor = $TextCol; $chkOpenDir.BackColor = $Bg; $chkOpenDir.Checked = $true
+$tabRun.Controls.Add($chkOpenDir)
+
+# ---------------- Tab4: 排行榜 ----------------
+$tabRace.Controls.Add((New-Label 'GTA VI PC Race 排行榜（每次启动自动更新）' 14 12 500 22 10))
+$lblRaceUpdated = New-Label '尚未更新' 500 12 470 22 9 $Muted
+$tabRace.Controls.Add($lblRaceUpdated)
+$txtRace = New-Object System.Windows.Forms.TextBox
+$txtRace.Location = New-Object System.Drawing.Point(14, 40)
+$txtRace.Size = New-Object System.Drawing.Size(960, 300)
+$txtRace.Multiline = $true; $txtRace.ReadOnly = $true; $txtRace.ScrollBars = 'Vertical'
+$txtRace.BackColor = [System.Drawing.Color]::FromArgb(16, 12, 28); $txtRace.ForeColor = $TextCol
+$txtRace.Font = New-Object System.Drawing.Font('Consolas', 9)
+$tabRace.Controls.Add($txtRace)
+$btnRaceNow = New-Btn '立即刷新排名' 14 350 160 32
+$tabRace.Controls.Add($btnRaceNow)
+$lblRaceSrc = New-Label '数据源: vuyp.github.io/gta6-pc-race（启动时自动拉取）' 190 356 500 22 9 $Muted
+$tabRace.Controls.Add($lblRaceSrc)
+$tabRace.Controls.Add((New-Label '为本机推荐（按显卡/显存/速度/稳定性匹配）' 14 392 500 22 10))
+$lblRaceRec = New-Label '等待更新…' 14 418 960 100 9 $Green
+$tabRace.Controls.Add($lblRaceRec)
+
+# 日志
+$logBox = New-Object System.Windows.Forms.TextBox
+$logBox.Location = New-Object System.Drawing.Point(16, 600)
+$logBox.Size = New-Object System.Drawing.Size(1012, 170)
+$logBox.Multiline = $true; $logBox.ReadOnly = $true; $logBox.ScrollBars = 'Vertical'
+$logBox.BackColor = [System.Drawing.Color]::FromArgb(14, 10, 24); $logBox.ForeColor = [System.Drawing.Color]::FromArgb(190, 190, 210)
+$logBox.Font = New-Object System.Drawing.Font('Consolas', 9)
+$form.Controls.Add($logBox)
+
+# ---------------------------------------------------------------- 状态
+$script:exe = $null
+$script:buildName = ''
+$script:cacheDir = ''
+$script:dataDir = ''
+$script:skipFile = ''
+$script:proc = $null
+$script:game = $null
+$script:warmKind = ''
+$script:warmDone = 0
+$script:warmTotal = 0
+$script:warmSawDone = $false
+$script:autoStage = 0
+$script:race = $null
+$script:raceRec = $null
+$script:raceCache = Join-Path $Root 'race-cache.json'
+$script:outLog = Join-Path $env:TEMP 'gta6-launcher-warm.out.log'
+$script:errLog = Join-Path $env:TEMP 'gta6-launcher-warm.err.log'
+$script:posOut = 0
+$script:posErr = 0
+$script:hw = $null
+$script:rec = $null
+
+function Add-Log([string]$s) {
+    try { $logBox.AppendText(("{0:HH:mm:ss} {1}" -f (Get-Date), $s) + "`r`n"); $logBox.SelectionStart = $logBox.TextLength; $logBox.ScrollToCaret() } catch { }
+}
+
+# ---------------------------------------------------------------- 硬件检测
+function Detect-Hardware {
+    $gpus = @()
+    try {
+        $gpus = @(Get-CimInstance Win32_VideoController -EA SilentlyContinue | Select-Object Name, AdapterRAM, DriverVersion)
+    } catch { }
+    $cpu = $null; $ram = 0; $os = ''
+    try { $cpu = Get-CimInstance Win32_Processor -EA SilentlyContinue | Select-Object -First 1 Name, NumberOfCores, NumberOfLogicalProcessors } catch { }
+    try { $cs = Get-CimInstance Win32_ComputerSystem -EA SilentlyContinue; $ram = [math]::Round($cs.TotalPhysicalMemory / 1GB, 1) } catch { }
+    try { $o = Get-CimInstance Win32_OperatingSystem -EA SilentlyContinue; $os = "$($o.Caption) build $($o.BuildNumber)" } catch { }
+
+    # NVIDIA 用 nvidia-smi 取准确显存
+    $nv = $null
+    if (Get-Command nvidia-smi -EA SilentlyContinue) {
+        try {
+            $q = & nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader 2>$null | Select-Object -First 1
+            if ($q) { $parts = $q -split ','; $nv = @{ Name = $parts[0].Trim(); VramMB = [int]($parts[1] -replace '[^\d]', ''); Driver = $parts[2].Trim() } }
+        } catch { }
+    }
+    $name = ''; $vendor = ''; $vramMB = 0
+    if ($nv) {
+        $name = $nv.Name; $vramMB = $nv.VramMB
+        if ($name -match 'NVIDIA') { $vendor = 'NVIDIA' }
+    } else {
+        $best = $gpus | Where-Object { $_.Name -notmatch 'Microsoft Basic|Parsec|Virtual' } | Select-Object -First 1
+        if ($best) {
+            $name = $best.Name
+            if ($best.Name -match 'NVIDIA') { $vendor = 'NVIDIA' }
+            elseif ($best.Name -match 'AMD|Radeon') { $vendor = 'AMD' }
+            elseif ($best.Name -match 'Intel') { $vendor = 'Intel' }
+            else { $vendor = 'Other' }
+            try { $vramMB = [int]([math]::Round($best.AdapterRAM / 1MB)) } catch { }
+            if ($vramMB -le 0) { $vramMB = 0 }
+        }
+    }
+    if (-not $vendor) { $vendor = 'Unknown' }
+    return [pscustomobject]@{
+        GpuName = $name; Vendor = $vendor; VramMB = $vramMB
+        CpuName = $(if ($cpu) { $cpu.Name.Trim() } else { '未知' })
+        CpuCores = $(if ($cpu) { $cpu.NumberOfCores } else { 0 })
+        CpuThreads = $(if ($cpu) { $cpu.NumberOfLogicalProcessors } else { 0 })
+        RamGB = $ram; OS = $os
+        Gpus = $gpus
+    }
+}
+
+function Recommend($hw) {
+    $vramGB = [math]::Round($hw.VramMB / 1024, 1)
+    $buildWhy = ''
+    $build = 'nvidia'
+    if ($hw.Vendor -eq 'NVIDIA') { $build = 'nvidia'; $buildWhy = 'NVIDIA 显卡：用 NVIDIA 分支（wave32 兼容最好）' }
+    elseif ($hw.Vendor -eq 'AMD') { $build = 'amd'; $buildWhy = 'AMD 显卡：用上游主线（原生 wave64，无需模拟）' }
+    elseif ($hw.Vendor -eq 'Intel') { $build = 'unknown'; $buildWhy = 'Intel 显卡：不支持（需要 RDNA2/NVIDIA 桌面卡）' }
+    else { $build = 'unknown'; $buildWhy = '未知显卡：按 NVIDIA 分支尝试' }
+
+    $height = 540
+    if ($vramGB -ge 12) { $height = 1080 }
+    elseif ($vramGB -ge 10) { $height = 720 }
+    elseif ($vramGB -ge 7) { $height = 540 }
+    else { $height = 480 }
+    if ($hw.Vendor -eq 'AMD' -and $vramGB -ge 12) { $height = 1080 }
+
+    $console = if ($hw.Vendor -eq 'AMD') { 'series-x' } else { 'series-s' }
+    $scale = [math]::Round($height / $(if ($console -eq 'series-x') { 2160 } else { 1080 }), 4)
+    $preset = if ($vramGB -le 6) { 'low' } elseif ($vramGB -le 9) { 'balanced' } else { 'quality' }
+
+    return [pscustomobject]@{
+        Vendor = $hw.Vendor; VramGB = $vramGB; Build = $build; BuildWhy = $buildWhy
+        Console = $console; Height = $height; Scale = $scale; Preset = $preset
+    }
+}
+
+function Refresh-Hw {
+    Add-Log '检测硬件…'
+    $hw = Detect-Hardware
+    $script:hw = $hw
+    $lines = @()
+    $lines += "显卡: $($hw.GpuName)"
+    $lines += "厂商: $($hw.Vendor)    显存: $([math]::Round($hw.VramMB/1024,1)) GB"
+    $lines += "CPU : $($hw.CpuName)  ($($hw.CpuCores) 核 / $($hw.CpuThreads) 线程)"
+    $lines += "内存: $($hw.RamGB) GB"
+    $lines += "系统: $($hw.OS)"
+    if ($hw.Gpus.Count -gt 1) { $lines += "其他显示适配器: " + (($hw.Gpus | Select-Object -Skip 1 | ForEach-Object { $_.Name }) -join '; ') }
+    $txtHw.Text = $lines -join "`r`n"
+
+    $rec = Recommend $hw
+    $script:rec = $rec
+    $recLines = @()
+    $recLines += "推荐构建: $($rec.Build)（$($rec.BuildWhy)）"
+    $recLines += "主机模式: $($rec.Console)    渲染分辨率: $($rec.Height)p（渲染缩放 $($rec.Scale)）"
+    $recLines += "画质预设: $($rec.Preset)    显存判断: $($rec.VramGB) GB"
+    if ($rec.Build -eq 'unknown') { $recLines += '⚠ 该显卡可能无法运行，仍可尝试' }
+    $txtRec.Text = $recLines -join "`r`n"
+    Add-Log ("硬件: {0} / {1} / 显存 {2} GB" -f $hw.Vendor, $hw.GpuName, [math]::Round($hw.VramMB / 1024, 1))
+}
+
+# ---------------------------------------------------------------- 构建扫描
+function Scan-Builds {
+    $lstBuilds.Items.Clear()
+    $root = $tbBuildRoot.Text.Trim()
+    if (-not (Test-Path $root)) { Add-Log "构建根目录不存在: $root"; return }
+    $found = @()
+    foreach ($profile in 'diag', 'release') {
+        Get-ChildItem $root -Recurse -Depth 3 -Filter 'victory.exe' -EA SilentlyContinue |
+            Where-Object { $_.FullName -match "\\target\\$profile\\victory.exe$" } |
+            ForEach-Object {
+                $proj = $_.FullName -replace "\\target\\$profile\\victory\.exe$", ''
+                $found += [pscustomobject]@{
+                    Name = (Split-Path $proj -Leaf); Project = $proj; Exe = $_.FullName
+                    Profile = $profile; SizeMB = [math]::Round($_.Length / 1MB, 1); Time = $_.LastWriteTime
+                }
+            }
+    }
+    $found = $found | Sort-Object Project, Profile -Unique
+    foreach ($f in $found) {
+        $lstBuilds.Items.Add(('{0}  [{1}]  {2} MB  {3:MM-dd HH:mm}' -f $f.Name, $f.Profile, $f.SizeMB, $f.Time)) | Out-Null
+    }
+    $script:builds = $found
+    Add-Log ("扫描到 {0} 个本地构建" -f $found.Count)
+    if ($lstBuilds.Items.Count -gt 0) {
+        # 按硬件推荐挑默认构建：NVIDIA -> vf-nvidia/nvidia；AMD -> vf-main/upstream/7900；其次稳定版
+        $pref = 'vf-main'
+        if ($script:hw) {
+            if ($script:hw.Vendor -eq 'NVIDIA') { $pref = 'vf-nvidia|nvidia' }
+            elseif ($script:hw.Vendor -eq 'AMD') { $pref = 'vf-main|upstream|7900' }
+        }
+        $idx = -1
+        for ($i = 0; $i -lt $found.Count; $i++) {
+            if ($found[$i].Name -match $pref) { $idx = $i; break }
+        }
+        if ($idx -lt 0) { $idx = 0 }
+        $lstBuilds.SelectedIndex = $idx
+        Add-Log ("默认构建: {0}" -f $found[$idx].Name)
+    }
+}
+
+function Select-Build {
+    if ($lstBuilds.SelectedIndex -lt 0 -or -not $script:builds) { return }
+    $b = $script:builds[$lstBuilds.SelectedIndex]
+    $script:exe = $b.Exe
+    $script:buildName = "$($b.Name) [$($b.Profile)]"
+    $script:skipFile = Join-Path $b.Project 'scripts\rt_off_hashes.txt'
+    # 缓存/存档目录：优先用构建根下的约定目录
+    $cacheBase = $tbCacheRoot.Text.Trim()
+    $saveBase = $tbSaveRoot.Text.Trim()
+    $known = @{
+        'vf-nvidia' = @{ Cache = 'cache-nvidia'; Data = 'perf-data' }
+        'vf-main'   = @{ Cache = 'cache-upstream'; Data = 'perf-data-up' }
+        'cool_fox'  = @{ Cache = 'cache-coolfox'; Data = 'perf-data-cool' }
+    }
+    if ($known.ContainsKey($b.Name)) {
+        $script:cacheDir = Join-Path $cacheBase $known[$b.Name].Cache
+        $script:dataDir = Join-Path $saveBase $known[$b.Name].Data
+    } else {
+        $script:cacheDir = Join-Path $cacheBase ("cache-" + $b.Name)
+        $script:dataDir = Join-Path $saveBase ("perf-data-" + $b.Name)
+    }
+    New-Item -ItemType Directory -Force -Path $script:cacheDir, $script:dataDir -EA SilentlyContinue | Out-Null
+    $info = Get-ProjectInfo $b.Project
+    $script:projInfo = $info
+    $cache = Get-CacheState $b.Project $b.Time $info.Translator $script:cacheDir
+    $script:cacheState = $cache
+    $ver = if ($info.Git) { "$($info.Branch)@$($info.Commit)" } else { '非 git 工程' }
+    $tr = if ($info.Translator) { "翻译器 v$($info.Translator)" } else { '翻译器版本未知' }
+    $lblBuildInfo.Text = "已选: $($script:buildName)  |  $ver  |  $tr  |  $($cache.Text)"
+    Add-Log ("选中构建: {0} -> {1}" -f $script:buildName, $b.Exe)
+    Add-Log ("  版本: {0}  {1}  {2}" -f $ver, $tr, $cache.Text)
+}
+
+# ---------------------------------------------------------------- 环境与启动
+function Build-Env {
+    $b = $script:builds[$lstBuilds.SelectedIndex]
+    $rec = $script:rec
+    $console = if ($rbAutoCon.Checked -and $rec) { $rec.Console } elseif ($rbSX.Checked) { 'series-x' } else { 'series-s' }
+    $height = if ($rbAutoRes.Checked -and $rec) { $rec.Height } else { ($heights | Where-Object { $rbResMap[$_].Checked } | Select-Object -First 1) }
+    if (-not $height) { $height = $(if ($rec) { $rec.Height } else { 540 }) }
+    $out = if ($console -eq 'series-x') { 2160 } else { 1080 }
+    $scale = [math]::Round($height / $out, 4)
+    if ($scale -lt 0.2) { $scale = 0.2 }
+    if ($scale -gt 1.0) { $scale = 1.0 }
+
+    $env:VICTORY_GAME_DIR = $tbGame.Text.Trim()
+    $env:VICTORY_CACHE_DIR = $script:cacheDir
+    $env:VICTORY_DATA_DIR = $script:dataDir
+    $env:VICTORY_TEXTURE_NO_WAIT = '0'; $env:VICTORY_TEXTURE_STAGE_MS = '500'
+    $env:VICTORY_AMBIENT = '0.8'; $env:VICTORY_AMBIENT_AIR = '1.5'; $env:VICTORY_AMBIENT_MOST = '2'
+    $env:VICTORY_NAN_SCRUB = '1'; $env:VICTORY_BVH_MISS = '1'; $env:VICTORY_THIN = '1'
+    $env:VICTORY_JOIN_PARTS = '8'; $env:VICTORY_UPLOAD_AHEAD = '1'
+    $env:VICTORY_RELAY = '2'; $env:VICTORY_WIDE_BACK = '1'; $env:VICTORY_CARD_REHASH_RUNS = '1'
+    $env:VICTORY_JOIN_COPIES = '1'; $env:VICTORY_INDIRECT_WINDOW = '1'; $env:VICTORY_RELAY_COPY = '1'
+    $env:VICTORY_CARD_STEPS = '2'; $env:VICTORY_INDIRECT_BATCH = '2'; $env:VICTORY_MAP_THREADS = '1'
+    $env:VICTORY_TITLE_PRIORITIES = '0'; $env:VICTORY_CARD_AWAKE = '1'; $env:VICTORY_SHOW_AFTER = '1'
+    $env:VICTORY_PIPELINE_WAIT_MS = '10000'; $env:VICTORY_DYNAMIC_SLOTS = '524288'
+    $env:VICTORY_CARD_BUFFERS_MIN_MB = '1'; $env:VICTORY_CARD_BUFFERS_MB = '1536'
+    $env:VICTORY_RENDER_SCALE = [string]$scale
+    $env:VICTORY_OWN_UPSCALER = '1'
+    $env:VICTORY_COMPOSE = '1'
+    try { if (Test-Path $script:skipFile) { $env:VICTORY_SKIP_PIPELINES = (Get-Content $script:skipFile -Raw).Trim() } } catch { }
+    return @{ Console = $console; Height = $height; Scale = $scale }
+}
+
+function Start-Warm([string]$kind) {
+    try {
+        if ($script:proc -and -not $script:proc.HasExited) { Add-Log '预热已在运行'; return }
+        if (-not $script:exe) { Add-Log '请先选择构建'; return }
+        $rpf = Join-Path $tbGame.Text.Trim() 'shaders.rpf'
+        if ($kind -ne 'pipelines' -and -not (Test-Path $rpf)) { Add-Log "找不到 $rpf"; return }
+        $null = Build-Env
+        Remove-Item $script:outLog, $script:errLog -Force -EA SilentlyContinue
+        $script:posOut = 0; $script:posErr = 0; $script:warmDone = 0; $script:warmSawDone = $false
+        $script:warmKind = $kind
+        $procArgs = if ($kind -eq 'pipelines') { @('warm', '--used') } else { @('shaders', $rpf) }
+        $script:warmTotal = if ($kind -eq 'pipelines') { 2400 } else { 26000 }
+        $lblStatus.Text = if ($kind -eq 'pipelines') { '正在预编译管线…' } else { '正在预翻译着色器…' }
+        $script:proc = Start-Process -FilePath $script:exe -ArgumentList $procArgs -WorkingDirectory (Split-Path $script:exe) `
+            -RedirectStandardOutput $script:outLog -RedirectStandardError $script:errLog -PassThru -WindowStyle Hidden
+        Add-Log ("预热[{0}] PID={1}" -f $kind, $script:proc.Id)
+        $btnWarmAll.Enabled = $false; $btnWarmShaders.Enabled = $false; $btnWarmPipes.Enabled = $false
+        $btnStop.Enabled = $true; $btnLaunch.Enabled = $false
+        $progress.Value = 0
+    } catch {
+        Add-Log ("预热失败: " + $_.Exception.Message)
+        [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, '预热失败')
+    }
+}
+
+function Read-Log([string]$path, [ref]$pos) {
+    try {
+        if (-not (Test-Path $path)) { return @() }
+        $fs = [System.IO.File]::Open($path, 'Open', 'Read', 'ReadWrite')
+        try {
+            if ($fs.Length -lt $pos.Value) { $pos.Value = 0 }
+            $fs.Position = $pos.Value
+            $sr = New-Object System.IO.StreamReader($fs)
+            $text = $sr.ReadToEnd(); $pos.Value = $fs.Position; $sr.Dispose()
+        } finally { $fs.Dispose() }
+        if ($text) { return $text -split "`r?`n" | Where-Object { $_ -ne '' } }
+        return @()
+    } catch { return @() }
+}
+
+function Update-Warm {
+    if (-not $script:proc) { return }
+    $lines = @()
+    $lines += Read-Log $script:outLog ([ref]$script:posOut)
+    $lines += Read-Log $script:errLog ([ref]$script:posErr)
+    foreach ($line in $lines) {
+        Add-Log $line
+        if ($line -match '(\d+)\s+of\s+(\d+),\s+(\d+)\s*s') { $script:warmDone = [int]$matches[1]; $script:warmTotal = [int]$matches[2] }
+        elseif ($line -match '(\d+)\s+shaders in the cache') { $script:warmDone = [int]$matches[1]; if ($script:warmTotal -lt $script:warmDone) { $script:warmTotal = $script:warmDone } }
+        if ($line -match 'shaders in the cache|file scan complete|made in \d+') { $script:warmSawDone = $true }
+    }
+    if ($script:warmTotal -gt 0) {
+        $v = [int](100 * $script:warmDone / $script:warmTotal); if ($v -gt 100) { $v = 100 }
+        if ($v -ne $progress.Value) { $progress.Value = $v; $lblStatus.Text = ('预热中 {0}%' -f $v) }
+    }
+    if ($script:proc.HasExited) {
+        try { $null = $script:proc.WaitForExit(2000); $code = $script:proc.ExitCode } catch { $code = $null }
+        $script:proc = $null
+        try {
+            $tail = @()
+            $tail += Read-Log $script:outLog ([ref]$script:posOut)
+            $tail += Read-Log $script:errLog ([ref]$script:posErr)
+            foreach ($l in $tail) { Add-Log $l; if ($l -match 'shaders in the cache|file scan complete|made in \d+') { $script:warmSawDone = $true } }
+        } catch { }
+        $ok = ($null -eq $code) -or ("$code" -eq '') -or ($code -eq 0) -or $script:warmSawDone -or ($script:warmDone -gt 0)
+        Add-Log ("预热结束（退出码 {0}）" -f $(if ("$code" -eq '') { '未知' } else { $code }))
+        if ($script:warmKind -eq 'all' -and $ok -and $script:autoStage -eq 0) {
+            $script:autoStage = 1
+            Start-Warm 'pipelines'
+            return
+        }
+        $script:autoStage = 0
+        $progress.Value = 100
+        $btnWarmAll.Enabled = $true; $btnWarmShaders.Enabled = $true; $btnWarmPipes.Enabled = $true
+        $btnStop.Enabled = $false; $btnLaunch.Enabled = $true
+        $lblStatus.Text = '预热完成'
+        try {
+            if ($script:builds -and $lstBuilds.SelectedIndex -ge 0) {
+                $bb = $script:builds[$lstBuilds.SelectedIndex]
+                $mm = Get-Meta
+                $mm[$bb.Project] = [pscustomobject]@{
+                    commit = $script:projInfo.Commit; branch = $script:projInfo.Branch
+                    translator = $script:projInfo.Translator
+                    exeTime = $bb.Time.ToString('o'); prewarmTime = (Get-Date).ToString('o')
+                }
+                Save-Meta $mm
+                Add-Log '已记录预热时间戳'
+            }
+        } catch { }
+    }
+}
+
+function Stop-Warm {
+    try { if ($script:proc -and -not $script:proc.HasExited) { $script:proc.Kill($true); Add-Log '已停止预热' } } catch { }
+    $script:proc = $null; $script:autoStage = 0
+    $btnWarmAll.Enabled = $true; $btnWarmShaders.Enabled = $true; $btnWarmPipes.Enabled = $true
+    $btnStop.Enabled = $false; $btnLaunch.Enabled = $true
+    $lblStatus.Text = '已停止'
+}
+
+function Launch-Game {
+    try {
+        if (-not $script:exe) { Add-Log '请先选择构建'; return }
+        $already = @(Get-Process victory -EA SilentlyContinue | Where-Object { $_.MainWindowTitle -ne '' })
+        if ($already.Count -gt 0) { Add-Log '已有游戏在运行'; [System.Windows.Forms.MessageBox]::Show('已有游戏在运行，请先关闭。'); return }
+        if ($script:cacheState -and $script:cacheState.State -ne 'ok') {
+            $r = [System.Windows.Forms.MessageBox]::Show("$($script:cacheState.Text)`r`n`r`n仍然启动吗？（建议先「全部预热」）", '缓存可能过期', 'YesNo', 'Warning')
+            if ($r -ne 'Yes') { return }
+        }
+        $envInfo = Build-Env
+        $gameExe = Join-Path $tbGame.Text.Trim() 'game_scarlett_master.exe'
+        if (-not (Test-Path $gameExe)) { Add-Log "找不到游戏: $gameExe"; return }
+        Save-Cfg
+        Add-Log ("启动: {0} / {1} / {2}p (scale {3})" -f $script:buildName, $envInfo.Console, $envInfo.Height, $envInfo.Scale)
+        Add-Log ("缓存: {0}" -f $script:cacheDir)
+        $script:game = Start-Process -FilePath $script:exe -ArgumentList @('run', $gameExe, '--execute', '--console', $envInfo.Console) `
+            -WorkingDirectory (Split-Path $script:exe) -PassThru
+        Add-Log ("游戏已启动 PID={0}" -f $script:game.Id)
+        $lblStatus.Text = '游戏运行中…'
+        $btnLaunch.Enabled = $false
+    } catch {
+        Add-Log ("启动失败: " + $_.Exception.Message)
+        [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, '启动失败')
+    }
+}
+
+# ---------------------------------------------------------------- GitHub 下载
+function Download-FromGitHub([string]$repo, [string]$branch, [string]$destDir, [switch]$Release) {
+    try {
+        New-Item -ItemType Directory -Force -Path $destDir | Out-Null
+        $url = ''
+        $file = ''
+        if ($Release) {
+            $api = "https://api.github.com/repos/$repo/releases/latest"
+            $rel = Invoke-RestMethod -Uri $api -Headers @{ 'User-Agent' = 'gta6-launcher' } -TimeoutSec 30
+            $asset = $rel.assets | Where-Object { $_.name -match '(?i)windows|win64|x64' } | Select-Object -First 1
+            if (-not $asset) { $asset = $rel.assets | Select-Object -First 1 }
+            if (-not $asset) { Add-Log '该仓库没有 Release 附件，请改下载源码'; return }
+            $url = $asset.browser_download_url; $file = Join-Path $destDir $asset.name
+            Add-Log ("下载 Release: {0}" -f $asset.name)
+        } else {
+            $url = "https://codeload.github.com/$repo/zip/refs/heads/$branch"
+            $file = Join-Path $destDir ("$($repo -replace '/', '_')-$branch.zip")
+            Add-Log ("下载源码: {0} @ {1}" -f $repo, $branch)
+        }
+        $lblStatus.Text = '正在下载…'
+        Invoke-WebRequest -Uri $url -OutFile $file -TimeoutSec 600 -UseBasicParsing
+        $size = [math]::Round((Get-Item $file).Length / 1MB, 1)
+        Add-Log ("下载完成: {0} ({1} MB)" -f $file, $size)
+        if (-not $Release) {
+            $extract = Join-Path $destDir ([System.IO.Path]::GetFileNameWithoutExtension($file))
+            if (Test-Path $extract) { Remove-Item $extract -Recurse -Force -EA SilentlyContinue }
+            Expand-Archive -Path $file -DestinationPath $extract -Force
+            Add-Log ("已解压到: {0}" -f $extract)
+        }
+        $lblStatus.Text = '下载完成'
+        Scan-Builds
+    } catch {
+        Add-Log ("下载失败: " + $_.Exception.Message)
+        [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, '下载失败')
+    }
+}
+
+function Compile-Selected {
+    try {
+        if ($lstBuilds.SelectedIndex -lt 0) { Add-Log '先选中一个构建'; return }
+        $b = $script:builds[$lstBuilds.SelectedIndex]
+        if (-not (Get-Command cargo -EA SilentlyContinue)) { Add-Log '找不到 cargo，请先安装 Rust 工具链'; return }
+        Add-Log ("编译 {0}（可能需要几分钟）" -f $b.Project)
+        $lblStatus.Text = '正在编译…'
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = 'cargo'; $psi.Arguments = 'build --profile diag -p victory --features diagnostics'
+        $psi.WorkingDirectory = $b.Project; $psi.UseShellExecute = $false
+        $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true; $psi.CreateNoWindow = $true
+        $p = [System.Diagnostics.Process]::Start($psi)
+        $out = $p.StandardOutput.ReadToEnd() + $p.StandardError.ReadToEnd()
+        $p.WaitForExit()
+        $tail = ($out -split "`r?`n" | Select-Object -Last 6) -join ' | '
+        Add-Log ("编译结束: " + $tail)
+        Scan-Builds
+        $lblStatus.Text = '编译完成'
+    } catch {
+        Add-Log ("编译失败: " + $_.Exception.Message)
+    }
+}
+
+# ---------------------------------------------------------------- 上游更新
+function Check-Update {
+    try {
+        if ($lstBuilds.SelectedIndex -lt 0) { Add-Log '先选中一个构建'; return }
+        $b = $script:builds[$lstBuilds.SelectedIndex]
+        $info = Get-ProjectInfo $b.Project
+        $script:projInfo = $info
+        $proxy = $tbProxy.Text.Trim()
+        if ($info.Git) {
+            $gp = if ($proxy) { @('-c', "http.proxy=$proxy", '-c', "https.proxy=$proxy") } else { @() }
+            Add-Log ("检查上游: {0} 分支 {1}" -f $info.Remote, $info.Branch)
+            $null = & git -C $b.Project @gp fetch origin 2>&1 | Select-Object -Last 2 | ForEach-Object { if ($_) { Add-Log ("  git: " + $_) } }
+            $behind = & git -C $b.Project rev-list --count "HEAD..origin/$($info.Branch)" 2>$null
+            $head = & git -C $b.Project log -1 --format='%h %s' "origin/$($info.Branch)" 2>$null
+            if ("$behind" -match '^\d+$') {
+                if ([int]$behind -gt 0) {
+                    $lblVerInfo.Text = "落后上游 $behind 个提交 | 上游最新: $head"
+                    Add-Log ("有更新：落后 {0} 个提交，上游最新 {1}" -f $behind, $head)
+                } else {
+                    $lblVerInfo.Text = '已是最新'
+                    Add-Log '已是最新'
+                }
+            } else { Add-Log '无法比较（分支或远端缺失）' }
+        } else {
+            $repo = $tbRepo.Text.Trim(); $branch = $tbBranch.Text.Trim()
+            $c = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/commits/$branch" -Headers @{ 'User-Agent' = 'gta6-launcher' } -TimeoutSec 20
+            $msg = ($c.commit.message -split "`n")[0]
+            $lblVerInfo.Text = ("上游最新: {0} {1}" -f $c.sha.Substring(0, 7), $msg)
+            Add-Log ("上游最新: {0} {1}" -f $c.sha.Substring(0, 7), $msg)
+        }
+    } catch { Add-Log ("检查更新失败: " + $_.Exception.Message); $lblVerInfo.Text = '检查失败' }
+}
+
+function Update-Build {
+    try {
+        if ($lstBuilds.SelectedIndex -lt 0) { Add-Log '先选中一个构建'; return }
+        $b = $script:builds[$lstBuilds.SelectedIndex]
+        $info = Get-ProjectInfo $b.Project
+        if (-not $info.Git) { Add-Log '该构建不是 git 工程：请用「下载源码 ZIP」重新获取'; return }
+        $r = [System.Windows.Forms.MessageBox]::Show("将更新 $($b.Name) 并重新编译。`r`n更新前会自动备份当前 exe。`r`n`r`n继续吗？", '更新构建', 'YesNo', 'Question')
+        if ($r -ne 'Yes') { return }
+        $bak = "$($b.Exe).bak-" + (Get-Date -Format 'yyyyMMdd-HHmmss')
+        Copy-Item $b.Exe $bak -Force
+        Add-Log ("已备份 exe: {0}" -f (Split-Path $bak -Leaf))
+        $proxy = $tbProxy.Text.Trim()
+        $gp = if ($proxy) { @('-c', "http.proxy=$proxy", '-c', "https.proxy=$proxy") } else { @() }
+        $null = & git -C $b.Project @gp pull --ff-only 2>&1 | Select-Object -Last 3 | ForEach-Object { if ($_) { Add-Log ("  git: " + $_) } }
+        $mm = Get-Meta
+        if ($mm[$b.Project]) { $mm[$b.Project].prewarmTime = ''; Save-Meta $mm }
+        Add-Log '源码已更新，开始编译…'
+        Compile-Selected
+        $lblVerInfo.Text = '更新+编译完成 → 需要重新「全部预热」'
+        Add-Log '更新完成：请重新执行「全部预热」'
+    } catch { Add-Log ("更新失败: " + $_.Exception.Message) }
+}
+
+function Rollback-Build {
+    try {
+        if ($lstBuilds.SelectedIndex -lt 0) { Add-Log '先选中一个构建'; return }
+        $b = $script:builds[$lstBuilds.SelectedIndex]
+        $baks = @(Get-ChildItem ("$($b.Exe).bak-*") -EA SilentlyContinue | Sort-Object LastWriteTime -Descending)
+        if ($baks.Count -eq 0) { Add-Log '没有可回滚的备份'; return }
+        Copy-Item $baks[0].FullName $b.Exe -Force
+        Add-Log ("已回滚到 {0}（{1:MM-dd HH:mm}）" -f $baks[0].Name, $baks[0].LastWriteTime)
+        $lblVerInfo.Text = "已回滚到 $($baks[0].Name)"
+        Scan-Builds
+    } catch { Add-Log ("回滚失败: " + $_.Exception.Message) }
+}
+
+# ---------------------------------------------------------------- 排行榜（GTA VI PC Race）
+function LaneStep($lane) {
+    if ($null -eq $lane) { return 0.0 }
+    try {
+        if ($lane.PSObject.Properties['step']) { return [double]$lane.step }
+    } catch { }
+    try { return [double]$lane } catch { return 0.0 }
+}
+
+function SpeedStep($lane) {
+    if ($null -eq $lane) { return 0.0 }
+    try { if ($lane.PSObject.Properties['step']) { return [double]$lane.step } } catch { }
+    $v = 0.0
+    try { $v = [double]$lane.high } catch { try { $v = [double]$lane.low } catch { } }
+    if ($v -le 0) { return 0.0 }
+    if ($v -lt 2) { return 1.0 } elseif ($v -lt 5) { return 2.0 } elseif ($v -lt 10) { return 3.0 }
+    elseif ($v -lt 20) { return 4.0 } elseif ($v -lt 30) { return 5.0 } else { return 6.0 }
+}
+function StabilityStep($lane) {
+    if ($null -eq $lane) { return 0.0 }
+    try { if ($lane.PSObject.Properties['step']) { return [double]$lane.step } } catch { }
+    $m = 0.0
+    try { $m = [double]$lane.minutes } catch { }
+    if ($m -le 0) { return 0.0 }
+    if ($m -lt 10) { return 1.0 } elseif ($m -lt 30) { return 2.0 } elseif ($m -lt 60) { return 3.0 } else { return 4.0 }
+}
+
+$script:badBuilds = @{ 'cool_fox' = '白屏（已知问题，不建议）' }
+function Get-RepoCandidates([string]$proj) {
+    $ordered = @()
+    # 先放当前分支跟踪的远端（worktree 的 upstream 才是真实上游）
+    try {
+        $u = & git -C $proj rev-parse --abbrev-ref '@{u}' 2>$null | Select-Object -First 1
+        if ($u -match '^([^/]+)/') {
+            $remoteName = $matches[1]
+            $url = & git -C $proj remote get-url $remoteName 2>$null | Select-Object -First 1
+            if ($url -and ($url -match 'github\.com[:/]([^/\s]+/[^/\s]+?)(?:\.git)?$')) { $ordered += $matches[1] }
+        }
+    } catch { }
+    try {
+        $raw = & git -C $proj remote -v 2>$null
+        foreach ($line in @($raw)) {
+            if ($line -match 'github\.com[:/]([^/\s]+/[^/\s]+?)(?:\.git)?\s') { $ordered += $matches[1] }
+            elseif ($line -match 'github\.com[:/]([^/\s]+/[^/\s]+?)(?:\.git)?$') { $ordered += $matches[1] }
+        }
+    } catch { }
+    return @($ordered | Select-Object -Unique)
+}
+
+function Get-RaceRecommendation($data) {
+    $hw = $script:hw
+    if (-not $hw) { return @() }
+    $scored = @()
+    foreach ($p in @($data.projects | Where-Object { $_.repo -and $_.stage -ge 6 })) {
+        $gpuText = (@($p.tested.gpu) -join ' ')
+        $vendorMatch = 0.0
+        if ($hw.Vendor -eq 'NVIDIA' -and $gpuText -match 'NVIDIA|RTX|GTX') { $vendorMatch = 1.0 }
+        elseif ($hw.Vendor -eq 'AMD' -and $gpuText -match 'AMD|Radeon') { $vendorMatch = 1.0 }
+        elseif ($gpuText -match 'NVIDIA|AMD') { $vendorMatch = 0.3 }
+        $vramClose = 0.5
+        $text = "$($p.status) $($p.kind) $gpuText"
+        $cardNums = @()
+        foreach ($pat in 'RTX\s*\d{4}\s*(?:Ti|SUPER)?[^\d]{0,20}?(\d+)\s*GB', 'RX\s*\d{4}\s*(?:XT|XTX)?[^\d]{0,20}?(\d+)\s*GB', '(\d+)\s*GB\s*(?:card|VRAM)') {
+            foreach ($m0 in [regex]::Matches($text, $pat, 'IgnoreCase')) { $cardNums += [int]$m0.Groups[1].Value }
+        }
+        if ($cardNums.Count -eq 0) {
+            $all = @([regex]::Matches($gpuText, '(\d+)\s*GB') | ForEach-Object { [int]$_.Groups[1].Value } | Where-Object { $_ -le 48 })
+            $cardNums = $all
+        }
+        if ($cardNums.Count -gt 0 -and $hw.VramMB -gt 0) {
+            $userGB = $hw.VramMB / 1024
+            $minDiff = ($cardNums | ForEach-Object { [math]::Abs($_ - $userGB) } | Measure-Object -Minimum).Minimum
+            $vramClose = [math]::Max(0.0, 1.0 - $minDiff / 8.0)
+        }
+        $posBonus = 0.5 * [math]::Max(0.0, (50.0 - [double]$p.pos) / 48.0)
+        $speed = (SpeedStep $p.lanes.speed) / 6.0
+        $stab = (StabilityStep $p.lanes.stability) / 4.0
+        $pict = (LaneStep $p.lanes.picture) / 5.0
+        $score = 3.0 * $vendorMatch + 2.0 * $vramClose + 1.5 * $speed + 1.0 * $stab + 1.0 * $pict + $posBonus
+        $scored += [pscustomobject]@{ Project = $p; Score = [math]::Round($score, 2); VendorMatch = $vendorMatch; VramClose = $vramClose }
+    }
+    return @($scored | Sort-Object Score -Descending)
+}
+
+function Find-LocalBuildForRepo([string]$repo) {
+    if (-not $repo) { return '' }
+    foreach ($b in @($script:builds)) {
+        try {
+            foreach ($r in (Get-RepoCandidates $b.Project)) {
+                if ($r -ieq $repo) { return $b.Name }
+            }
+        } catch { }
+    }
+    return ''
+}
+
+function Update-Race {
+    try {
+        $url = $Cfg.RaceUrl
+        if (-not $url) { $url = 'https://vuyp.github.io/gta6-pc-race/src/data.json' }
+        $tmp = Join-Path $env:TEMP 'gta6-race.json'
+        $fetched = $false
+        try {
+            Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing -TimeoutSec 40
+            Copy-Item $tmp $script:raceCache -Force
+            $fetched = $true
+            Add-Log '排行榜已更新'
+        } catch {
+            Add-Log ("排行榜下载失败: " + $_.Exception.Message)
+            if (Test-Path $script:raceCache) { Add-Log '使用本地缓存排行' } else { $lblRaceUpdated.Text = '排行榜获取失败（无缓存）'; return }
+        }
+        $data = Get-Content $script:raceCache -Raw -Encoding UTF8 | ConvertFrom-Json
+        $script:race = $data
+        $rows = @()
+        $rows += ("已检查: {0}    领跑: {1}" -f $data.checked, $data.projects[0].name)
+        $rows += ''
+        foreach ($p in @($data.projects | Sort-Object pos | Select-Object -First 25)) {
+            $repo = if ($p.repo) { $p.repo } else { '(无公开代码)' }
+            $rows += ("{0,2}. {1,-24} st{2}  画面{3}/5 速度{4}/6 稳定{5}/4  {6}" -f $p.pos, $p.name, $p.stage, (LaneStep $p.lanes.picture), (SpeedStep $p.lanes.speed), (StabilityStep $p.lanes.stability), $repo)
+        }
+        if ($data.watching -and @($data.watching).Count -gt 0) {
+            $rows += ''
+            $rows += '--- 关注中（尚无阶段）---'
+            foreach ($w in @($data.watching | Select-Object -First 8)) { $rows += ("    {0}  {1}" -f $w.name, $w.repo) }
+        }
+        $txtRace.Text = $rows -join "`r`n"
+        $lblRaceUpdated.Text = ("数据时间: {0}" -f $data.checked)
+
+        $scored = Get-RaceRecommendation $data
+        if ($scored.Count -gt 0) {
+            $lines = @()
+            $lines += ("本机: {0} / {1} GB 显存 / {2} GB 内存 → 推荐前 3：" -f $script:hw.Vendor, [math]::Round($script:hw.VramMB / 1024, 0), $script:hw.RamGB)
+            $i = 0
+            foreach ($s in ($scored | Select-Object -First 3)) {
+                $i++
+                $p = $s.Project
+                $gpu = (@($p.tested.gpu) -join ', ')
+                $lines += ("  {0}. {1}（榜上第 {2} 名, 匹配分 {3}）" -f $i, $p.name, $p.pos, $s.Score)
+                $lines += ("     画面{0}/5 速度{1}/6 稳定{2}/4 | 测试显卡: {3}" -f (LaneStep $p.lanes.picture), (SpeedStep $p.lanes.speed), (StabilityStep $p.lanes.stability), $(if ($gpu) { $gpu } else { '未注明' }))
+                $local = Find-LocalBuildForRepo $p.repo
+                if ($local) { $lines += ("     ✅ 本地已有对应构建: {0} → 去「② 构建与下载」选它" -f $local) }
+                else { $lines += ("     → 本地没有，仓库: https://github.com/{0}" -f $p.repo) }
+            }
+            # 你的本地构建在榜上排第几
+            $lines += ''
+            $lines += '你的本地构建在榜情况：'
+            $seen = @{}
+            foreach ($b in @($script:builds)) {
+                if ($seen.ContainsKey($b.Name)) { continue }
+                $seen[$b.Name] = 1
+                $cands = @(Get-RepoCandidates $b.Project)
+                $mp = $null
+                foreach ($c in $cands) { $m2 = @($data.projects | Where-Object { $_.repo -and ($_.repo -ieq $c) } | Select-Object -First 1); if ($m2.Count -gt 0) { $mp = $m2[0]; break } }
+                if ($mp) {
+                    $tag = if ($script:badBuilds.ContainsKey($b.Name)) { '  ⚠ ' + $script:badBuilds[$b.Name] } else { '' }
+                    $lines += ("  {0,-12} → 榜上 {1}（第 {2} 名, 画面{3}/5 速度{4}/6 稳定{5}/4）{6}" -f $b.Name, $mp.name, $mp.pos, (LaneStep $mp.lanes.picture), (SpeedStep $mp.lanes.speed), (StabilityStep $mp.lanes.stability), $tag)
+                } else {
+                    $lines += ("  {0,-12} → 未上榜" -f $b.Name)
+                }
+            }
+            # 本地最佳选择
+            $bestLocal = $null
+            $bestLocalScore = -1
+            foreach ($b in @($script:builds)) {
+                if ($script:badBuilds.ContainsKey($b.Name)) { continue }
+                $cands = @(Get-RepoCandidates $b.Project)
+                if ($cands.Count -eq 0) { continue }
+                foreach ($s in $scored) {
+                    $p2 = $s.Project
+                    if (-not $p2.repo) { continue }
+                    if (($cands | Where-Object { $_ -ieq $p2.repo }) -and $s.Score -gt $bestLocalScore) {
+                        $bestLocalScore = $s.Score
+                        $bestLocal = "$($b.Name)（对应 $($p2.name) 第 $($p2.pos) 名）"
+                    }
+                }
+            }
+            if ($bestLocal) { $lines += ("  ★ 本地最适合你的构建: {0}" -f $bestLocal) }
+            $lblRaceRec.Text = ($lines -join "`r`n")
+            $script:raceRec = $scored
+            Add-Log ("排行榜推荐已生成（{0} 行）：{1}" -f $lines.Count, ((@($scored | Select-Object -First 3) | ForEach-Object { $_.Project.name }) -join ' > '))
+        }
+    } catch {
+        Add-Log ("排行榜处理失败: " + $_.Exception.Message)
+        $lblRaceUpdated.Text = '排行榜处理失败'
+    }
+}
+
+# ---------------------------------------------------------------- 事件
+foreach ($b in $btnBrowse) {
+    $b.Add_Click({
+        $i = [int]$this.Tag
+        $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
+        $dlg.Description = '选择目录'
+        if (Test-Path $tbPath[$i].Text) { $dlg.SelectedPath = $tbPath[$i].Text }
+        if ($dlg.ShowDialog() -eq 'OK') { $tbPath[$i].Text = $dlg.SelectedPath; Save-Cfg }
+    })
+}
+$btnScan.Add_Click({ Scan-Builds })
+$btnRaceNow.Add_Click({ Update-Race })
+$btnCheck.Add_Click({ Check-Update })
+$btnUpdate.Add_Click({ Update-Build })
+$btnRollback.Add_Click({ Rollback-Build })
+$lstBuilds.Add_SelectedIndexChanged({ try { Select-Build } catch { Add-Log "选择构建出错: $($_.Exception.Message)" } })
+$btnDlSrc.Add_Click({ Download-FromGitHub $tbRepo.Text.Trim() $tbBranch.Text.Trim() $tbDlDir.Text.Trim() })
+$btnDlRel.Add_Click({ Download-FromGitHub $tbRepo.Text.Trim() $tbBranch.Text.Trim() $tbDlDir.Text.Trim() -Release })
+$btnCargo.Add_Click({ Compile-Selected })
+$btnWarmShaders.Add_Click({ Start-Warm 'shaders' })
+$btnWarmPipes.Add_Click({ Start-Warm 'pipelines' })
+$btnWarmAll.Add_Click({ Start-Warm 'all' })
+$btnStop.Add_Click({ Stop-Warm })
+$btnLaunch.Add_Click({ Launch-Game })
+
+$timer = New-Object System.Windows.Forms.Timer
+$timer.Interval = 250
+$timer.Add_Tick({
+    try { Update-Warm } catch { Add-Log ("更新出错: " + $_.Exception.Message) }
+    try {
+        if ($script:game -and $script:game.HasExited) {
+            Add-Log ("游戏已退出（{0}）" -f $script:game.ExitCode)
+            $script:game = $null; $btnLaunch.Enabled = $true; $lblStatus.Text = '游戏已退出'
+        }
+    } catch { }
+})
+$timer.Start()
+
+$form.Add_FormClosing({
+    try { Save-Cfg } catch { }
+    try { if ($script:proc -and -not $script:proc.HasExited) { $script:proc.Kill($true) } } catch { }
+    try { if ($chkOpenDir.Checked -and $script:game -and -not $script:game.HasExited) { $script:game.Kill($true) } } catch { }
+})
+$form.Add_Shown({
+    Refresh-Hw
+    Scan-Builds
+    $raceTimer = New-Object System.Windows.Forms.Timer
+    $raceTimer.Interval = 1500
+    $raceTimer.Add_Tick({ $this.Stop(); try { Update-Race } catch { } })
+    $raceTimer.Start()
+    if ($env:GTA6_LAUNCHER_ROLLTEST) {
+        try {
+            $idx = -1
+            for ($i = 0; $i -lt $script:builds.Count; $i++) { if ($script:builds[$i].Name -eq 'vf-nvidia') { $idx = $i; break } }
+            if ($idx -ge 0) { $lstBuilds.SelectedIndex = $idx }
+            $exe = $script:builds[$idx].Exe
+            $bak = "$exe.bak-rolltest"
+            Copy-Item $exe $bak -Force
+            $before = (Get-FileHash $exe).Hash
+            Rollback-Build
+            $after = (Get-FileHash $exe).Hash
+            $lines = @()
+            $lines += "selected=" + $script:buildName
+            $lines += "backupFound=" + (Test-Path $bak)
+            $lines += "restoredSameHash=" + ($before -eq $after)
+            Set-Content -Path $env:GTA6_LAUNCHER_ROLLTEST -Value ($lines -join "`r`n") -Encoding UTF8
+            Remove-Item $bak -Force -EA SilentlyContinue
+        } catch { Set-Content -Path $env:GTA6_LAUNCHER_ROLLTEST -Value ("ERR " + $_.Exception.Message) -Encoding UTF8 }
+        $form.Close()
+    }
+    if ($env:GTA6_LAUNCHER_WARMTEST) {
+        Start-Warm 'all'
+        $wt = New-Object System.Windows.Forms.Timer
+        $wt.Interval = 45000
+        $wt.Add_Tick({
+            $this.Stop()
+            try {
+                $lines = @()
+                $lines += "warmKind=" + $script:warmKind
+                $lines += "warmDone=" + $script:warmDone + " / " + $script:warmTotal
+                $lines += "sawPipelines=" + ((Get-Content $script:outLog -EA SilentlyContinue | Select-String 'pipelines known|to make|made in' | Measure-Object).Count)
+                Set-Content -Path $env:GTA6_LAUNCHER_WARMTEST -Value ($lines -join "`r`n") -Encoding UTF8
+            } catch { }
+            Stop-Warm
+            $form.Close()
+        })
+        $wt.Start()
+    }
+    if ($env:GTA6_LAUNCHER_LAUNCHTEST) {
+        Start-Sleep -Milliseconds 500
+        Launch-Game
+        $lt = New-Object System.Windows.Forms.Timer
+        $lt.Interval = 75000
+        $lt.Add_Tick({
+            $this.Stop()
+            try {
+                $lines = @()
+                $p = Get-Process victory -EA SilentlyContinue | Select-Object -First 1
+                $lines += "gameRunning=" + $(if ($p) { 'yes' } else { 'no' })
+                if ($p) { $lines += "title=" + $p.MainWindowTitle }
+                $lines += "cacheDir=" + $script:cacheDir
+                Set-Content -Path $env:GTA6_LAUNCHER_LAUNCHTEST -Value ($lines -join "`r`n") -Encoding UTF8
+            } catch { }
+            Get-Process victory -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue
+            $form.Close()
+        })
+        $lt.Start()
+    }
+    if ($env:GTA6_LAUNCHER_RACEDUMP) {
+        $dumpTimer = New-Object System.Windows.Forms.Timer
+        $dumpTimer.Interval = 20000
+        $dumpTimer.Add_Tick({
+            $this.Stop()
+            try { Set-Content -Path $env:GTA6_LAUNCHER_RACEDUMP -Value ("updated=" + $lblRaceUpdated.Text + "`r`nrec=`r`n" + $lblRaceRec.Text) -Encoding UTF8 } catch { }
+            $form.Close()
+        })
+        $dumpTimer.Start()
+    }
+    if ($env:GTA6_LAUNCHER_RACETEST) {
+    try { Update-Race } catch { }
+    try {
+        $outLines = @()
+        $outLines += "updated=" + $lblRaceUpdated.Text
+        $outLines += "--- race rows ---"
+        $outLines += ($txtRace.Text -split "`r?`n" | Select-Object -First 6)
+        $outLines += "--- recommendation ---"
+        $outLines += $lblRaceRec.Text
+        Set-Content -Path $env:GTA6_LAUNCHER_RACETEST -Value ($outLines -join "`r`n") -Encoding UTF8
+    } catch { }
+    $form.Close()
+}
+if ($env:GTA6_LAUNCHER_CHECKUPDATE) {
+        try { Check-Update } catch { }
+        try { Set-Content -Path $env:GTA6_LAUNCHER_CHECKUPDATE -Value ("check=" + $lblVerInfo.Text) -Encoding UTF8 } catch { }
+        $form.Close()
+    }
+    if ($env:GTA6_LAUNCHER_SHOWTAB) { try { $tabs.SelectedIndex = [int]$env:GTA6_LAUNCHER_SHOWTAB } catch { } }
+    if ($env:GTA6_LAUNCHER_SELFTEST) {
+        try {
+            $lines = @()
+            $lines += "vendor=$($script:hw.Vendor) vramGB=$([math]::Round($script:hw.VramMB/1024,1))"
+            $lines += "cpu=$($script:hw.CpuName) ramGB=$($script:hw.RamGB)"
+            $lines += "recBuild=$($script:rec.Build) recConsole=$($script:rec.Console) recHeight=$($script:rec.Height) recPreset=$($script:rec.Preset)"
+            $lines += "builds=$($script:builds.Count)"
+            foreach ($b in $script:builds) { $lines += "  build: $($b.Name) [$($b.Profile)] $($b.SizeMB)MB" }
+            $lines += "selected=$($script:buildName)"
+            $info = Get-ProjectInfo $script:builds[$lstBuilds.SelectedIndex].Project
+            $lines += "git=$($info.Git) branch=$($info.Branch) commit=$($info.Commit) remote=$($info.Remote)"
+            $lines += "translator=$($info.Translator)"
+            $lines += "cacheState=$(($script:cacheState).State) | $(($script:cacheState).Text)"
+            $lines += "cacheDir=$($script:cacheDir)"
+            $lines += "dataDir=$($script:dataDir)"
+            Set-Content -Path $env:GTA6_LAUNCHER_SELFTEST -Value ($lines -join "`r`n") -Encoding UTF8
+        } catch { Set-Content -Path $env:GTA6_LAUNCHER_SELFTEST -Value ("ERR " + $_.Exception.Message) }
+        $form.Close()
+    }
+})
+
+$lblAuthor = New-Label '作者: DKTTT (github.com/DKTTT)  ·  基于 VIctory 社区项目 (avatarmanz / trustno1-coder / fxceless / codec-d)  ·  v1.0' 16 776 1012 20 8.5 $Muted
+$form.Controls.Add($lblAuthor)
+Add-Log 'GTA VI 自动启动器 v1.0 by DKTTT'
+[void]$form.ShowDialog()

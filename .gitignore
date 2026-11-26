@@ -1,0 +1,7 @@
+﻿# 本机配置/缓存（不入库）
+launcher-config.json
+race-cache.json
+builds-meta.json
+*.zip
+*.log
+*.bak-*
