@@ -227,3 +227,34 @@ v2 规则：
 实测对比（NVIDIA 8GB）：
 - v1.7.3：VI-BR-PORT 7.88 > AnyXboxX 7.85 > ztrx 7.37（#23 与 #2 几乎同分）
 - v1.8.0：VI-BR-PORT 8.31 > victory-unified 8.27 > ztrx 8.14 > AnyXboxX 8.1（都带"厂商匹配+显存接近+8GB实测"），AMD-only 项目降到 3.2~4.25
+
+## v1.8.1：编译不再卡死 GUI + 编译进度可见
+
+**问题**：之前「编译选中的源码构建」/ 拉取构建的编译是**同步阻塞**的（ReadToEnd + WaitForExit 在 UI 线程），编译几分钟界面完全卡死。
+
+**修复**：
+- 编译改为**后台异步进程**（`cargo` 输出重定向到临时日志文件）
+- 主定时器每 500ms 轮询：**状态栏实时显示进度** `编译中… 12:34 | Compiling victory-gpu v0.1.0`
+- 日志框每 3 秒追加一行最新编译输出（`│ ...`）
+- 编译期间**界面可正常操作**（切标签、看排行榜、改设置都不受影响）
+- 编译完成自动部署 + 刷新构建列表；失败自动改 `cargo build --release` 重试
+- 新增「停止编译」可直接取消（代码里 Stop-Compile）
+- 状态栏进度条切换为 Marquee 动画表示进行中
+
+**实测**（AnyXboxX 含 submodule，长编译 90 秒）：
+```
+tick elapsed=1 … elapsed=90（界面每 1 秒持续响应）
+status=编译中… 01:30 | Compiling xma v0.1.0 (third_party/tombox/crates/compat/xma)
+```
+
+### 顺带：编译源码可行性实测（2/2 成功）
+
+| 仓库 | 下载 | 编译 | 产物 |
+|---|---|---|---|
+| avatarmanz/VIctory-7900XTX | 2,216 KB ZIP | 1 分 35 秒 | victory.exe 11.2 MB |
+| Itsbatt/victory-unified | 1,461 KB ZIP | 1 分 20 秒 | victory.exe 8 MB |
+| LooperSalty/AnyXboxX | git clone --recursive（含 tombox submodule） | 进行中（90 秒仍在编译） | — |
+
+两个产物均验证可执行：`victory 0.1.0`。
+
+**新增 submodule 支持**：源码 ZIP 不含 git 子模块内容（如 AnyXboxX 的 `third_party/tombox`）；现在检测到 `.gitmodules` 自动改用 `git clone --recursive --depth 1`，实测克隆成功（tombox 1616 个文件）。

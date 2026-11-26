@@ -236,3 +236,23 @@ releaseAssets=0 → 自动转源码 ZIP
 - 主版本 `1.x`：启动器功能集
 - 次版本：新增功能（v1.2 排行榜、v1.3 键盘映射、v1.4 拉取构建、v1.5 Release 兜底、v1.6 崩溃记录、v1.7 排版修复、v1.8 推荐算法 v2）
 - 修订版本 `.x`：问题修复（v1.3.1 多开、v1.7.1 扫描兜底、v1.7.2 任意盘扫描、v1.7.3 盘符容错）
+## [v1.8.1] - 2026-11-26
+
+### 修复
+- **编译卡死 GUI**：编译从同步阻塞改为后台异步进程，主定时器轮询日志。
+  - 状态栏实时显示 `编译中… mm:ss | <当前编译的 crate>`
+  - 日志框每 3 秒追加最新输出行
+  - 编译期间界面完全可操作；完成后自动部署 + 刷新构建列表
+  - 失败自动重试 `cargo build --release`
+- 新增 `Stop-Compile`（可停止正在进行的编译）
+
+### 新增
+- **git submodule 支持**：检测到 `.gitmodules` 时改用 `git clone --recursive --depth 1`（ZIP 不包含子模块内容）。
+
+### 测试记录
+- 编译可行性（2/2 成功）：
+  - avatarmanz/VIctory-7900XTX：ZIP 2,216KB → 编译 1m35s → victory.exe 11.2MB
+  - Itsbatt/victory-unified：ZIP 1,461KB → 编译 1m20s → victory.exe 8MB
+  - 两个产物执行 `--version` 均输出 `victory 0.1.0`
+- submodule 仓库：LooperSalty/AnyXboxX clone --recursive 成功（third_party/tombox 1616 文件）
+- 异步编译实测：90 秒长编译期间界面定时器 tick 持续（elapsed 1→90），状态栏实时刷新

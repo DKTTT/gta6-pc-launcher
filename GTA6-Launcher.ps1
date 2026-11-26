@@ -407,6 +407,7 @@ $script:raceList = @()
 $script:recProjects = @()
 $script:logDir = Join-Path $Root 'logs'
 $script:gameLog = $null
+$script:compile = $null
 $script:gameStart = $null
 $script:crashFile = Join-Path $script:logDir 'crashes.jsonl'
 $script:crashCount = 0
@@ -848,27 +849,129 @@ function Download-FromGitHub([string]$repo, [string]$branch, [string]$destDir, [
     }
 }
 
+function Set-CompileButtons([bool]$enabled) {
+    try {
+        foreach ($btn in @($btnCargo, $btnLaunch)) { if ($btn) { $btn.Enabled = $enabled } }
+    } catch { }
+}
+
+function Start-CompileAsync([string]$cargoRoot, [string]$labelName) {
+    try {
+        if (-not (Get-Command cargo -EA SilentlyContinue)) { Add-Log '找不到 cargo，请先安装 Rust 工具链'; return $false }
+        if ($script:compile -and $script:compile.Proc -and -not $script:compile.Proc.HasExited) { Add-Log '已有编译在运行，请等它结束'; return $false }
+        $logOut = Join-Path $env:TEMP ("gta6-compile-out-" + (Get-Date -Format 'HHmmss') + '.log')
+        $logErr = Join-Path $env:TEMP ("gta6-compile-err-" + (Get-Date -Format 'HHmmss') + '.log')
+        Remove-Item $logOut,$logErr -EA SilentlyContinue
+        $script:compile = [pscustomobject]@{
+            Root = $cargoRoot; Label = $labelName; LogOut = $logOut; LogErr = $logErr
+            Attempts = @(@('build','--profile','diag','-p','victory','--features','diagnostics'), @('build','--release'))
+            Idx = 0; Start = Get-Date; Proc = $null; Done = $false; Ok = $false; LastShown = 0
+        }
+        $c = $script:compile
+        Add-Log ("开始编译: {0}（后台进行，界面不会卡）" -f $labelName)
+        $a = $c.Attempts[0]
+        $c.Proc = Start-Process -FilePath 'cargo' -ArgumentList $a -WorkingDirectory $c.Root `
+            -RedirectStandardOutput $c.LogOut -RedirectStandardError $c.LogErr -PassThru -WindowStyle Hidden
+        $lblStatus.Text = '编译中…（界面可正常操作）'
+        try { $progress.Style = 'Marquee'; $progress.MarqueeAnimationSpeed = 30 } catch { }
+        Set-CompileButtons $false
+        return $true
+    } catch { Add-Log ("编译启动失败: " + $_.Exception.Message); return $false }
+}
+
+function Stop-Compile {
+    try {
+        if ($script:compile -and $script:compile.Proc -and -not $script:compile.Proc.HasExited) {
+            $script:compile.Proc.Kill($true)
+            Add-Log '已取消编译'
+        }
+        $script:compile = $null
+        try { $progress.Style = 'Blocks'; $progress.MarqueeAnimationSpeed = 0 } catch { }
+        Set-CompileButtons $true
+        $lblStatus.Text = '编译已取消'
+    } catch { }
+}
+
+function Get-CompileTail([string]$path, [int]$n) {
+    try { if ($path -and (Test-Path $path)) { return @(Get-Content $path -Tail $n -EA SilentlyContinue) } } catch { }
+    return @()
+}
+
+function Finish-CompileAttempt([bool]$ok) {
+    $c = $script:compile
+    if (-not $c) { return }
+    if ($ok) {
+        $built = @(Get-ChildItem $c.Root -Recurse -Depth 6 -File -Filter 'victory*.exe' -EA SilentlyContinue |
+            Where-Object { $_.FullName -match '\\target\\(diag|release)\\victory\.exe$' } | Sort-Object LastWriteTime -Descending)
+        if ($built.Count -gt 0) {
+            $exe = $built[0]
+            Add-Log ("编译成功: {0} ({1:N1} MB)" -f $exe.FullName, ($exe.Length / 1MB))
+            # 部署到规范目录
+            try {
+                $dest = $tbDlDir.Text.Trim()
+                $name = ($c.Label -replace '[/:.]', '_')
+                $dst = Join-Path $dest (Join-Path $name 'target\release')
+                New-Item -ItemType Directory -Force -Path $dst | Out-Null
+                Copy-Item $exe.FullName (Join-Path $dst 'victory.exe') -Force
+                Add-Log ("已部署: {0}" -f (Join-Path $dst 'victory.exe'))
+            } catch { Add-Log ("部署失败: " + $_.Exception.Message) }
+            $c.Ok = $true; $c.Done = $true
+            Scan-Builds
+            $lblStatus.Text = ('编译完成: ' + $c.Label)
+            try { $progress.Style = 'Blocks'; $progress.MarqueeAnimationSpeed = 0 } catch { }
+            Set-CompileButtons $true
+            return
+        }
+    }
+    # 失败或没产物 → 尝试下一个方案
+    if ($c.Idx + 1 -lt $c.Attempts.Count) {
+        $c.Idx++
+        $a = $c.Attempts[$c.Idx]
+        Add-Log ("上一方案失败，改用: cargo {0}" -f ($a -join ' '))
+        try {
+            $c.Proc = Start-Process -FilePath 'cargo' -ArgumentList $a -WorkingDirectory $c.Root `
+                -RedirectStandardOutput $c.LogOut -RedirectStandardError $c.LogErr -PassThru -WindowStyle Hidden
+            return
+        } catch { Add-Log ("启动编译失败: " + $_.Exception.Message) }
+    }
+    $tail = @(Get-CompileTail $c.LogErr 12) + @(Get-CompileTail $c.LogOut 8)
+    foreach ($l in ($tail | Where-Object { $_ } | Select-Object -Last 12)) { Add-Log ('  │ ' + $l) }
+    Add-Log ("编译失败（日志: {0} / {1}）" -f $c.LogOut, $c.LogErr)
+    $c.Done = $true; $c.Ok = $false
+    $lblStatus.Text = '编译失败（见日志）'
+    try { $progress.Style = 'Blocks'; $progress.MarqueeAnimationSpeed = 0 } catch { }
+    Set-CompileButtons $true
+}
+
+function Update-Compile {
+    $c = $script:compile
+    if (-not $c -or $c.Done) { return }
+    try {
+        $elapsed = [int]((Get-Date) - $c.Start).TotalSeconds
+        if ($env:GTA6_LAUNCHER_TRACE) { Add-Content -Path $env:GTA6_LAUNCHER_TRACE -Value ((Get-Date).ToString('HH:mm:ss') + ' tick elapsed=' + $elapsed) -Encoding UTF8 }
+        $lastLine = (@(Get-CompileTail $c.LogOut 1) + @(Get-CompileTail $c.LogErr 1) | Where-Object { $_ } | Select-Object -Last 1)
+        $lblStatus.Text = ("编译中… {0:00}:{1:00} | {2}" -f [math]::Floor($elapsed/60), ($elapsed % 60), $(if ($lastLine) { $lastLine.Trim() } else { '准备中' }))
+        if (($elapsed - $c.LastShown) -ge 3 -and $lastLine) {
+            $c.LastShown = $elapsed
+            Add-Log ('  │ ' + $lastLine.Trim())
+        }
+        if ($c.Proc -and $c.Proc.HasExited) {
+            $code = $null
+            try { if ("$($c.Proc.ExitCode)" -ne '') { $code = $c.Proc.ExitCode } } catch { }
+            Add-Log ("编译进程退出（退出码 {0}）" -f $(if ($null -eq $code) { '未知' } else { $code }))
+            Finish-CompileAttempt ($null -eq $code -or $code -eq 0)
+        }
+    } catch { }
+}
+
 function Compile-Selected {
     try {
-        if ($lstBuilds.SelectedIndex -lt 0) { Add-Log '先选中一个构建'; return }
+        if ($lstBuilds.SelectedIndex -lt 0) { Add-Log '先在「② 构建与下载」选中一个构建'; return }
         $b = $script:builds[$lstBuilds.SelectedIndex]
-        if (-not (Get-Command cargo -EA SilentlyContinue)) { Add-Log '找不到 cargo，请先安装 Rust 工具链'; return }
-        Add-Log ("编译 {0}（可能需要几分钟）" -f $b.Project)
-        $lblStatus.Text = '正在编译…'
-        $psi = New-Object System.Diagnostics.ProcessStartInfo
-        $psi.FileName = 'cargo'; $psi.Arguments = 'build --profile diag -p victory --features diagnostics'
-        $psi.WorkingDirectory = $b.Project; $psi.UseShellExecute = $false
-        $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true; $psi.CreateNoWindow = $true
-        $p = [System.Diagnostics.Process]::Start($psi)
-        $out = $p.StandardOutput.ReadToEnd() + $p.StandardError.ReadToEnd()
-        $p.WaitForExit()
-        $tail = ($out -split "`r?`n" | Select-Object -Last 6) -join ' | '
-        Add-Log ("编译结束: " + $tail)
-        Scan-Builds
-        $lblStatus.Text = '编译完成'
-    } catch {
-        Add-Log ("编译失败: " + $_.Exception.Message)
-    }
+        $cargoRoot = $b.Project
+        if (-not (Test-Path (Join-Path $cargoRoot 'Cargo.toml'))) { Add-Log '该构建目录没有 Cargo.toml（不是源码工程）'; return }
+        [void](Start-CompileAsync $cargoRoot $b.Name)
+    } catch { Add-Log ("编译失败: " + $_.Exception.Message) }
 }
 
 # ---------------------------------------------------------------- 上游更新
@@ -1373,6 +1476,32 @@ function Build-And-Deploy([string]$cargo) {
     } catch { Add-Log ("编译失败: " + $_.Exception.Message); return $false }
 }
 
+function Test-HasSubmodules([string]$repo) {
+    try {
+        $null = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/contents/.gitmodules" -Headers @{ 'User-Agent' = 'gta6-launcher' } -TimeoutSec 15
+        return $true
+    } catch { return $false }
+}
+
+function Clone-RepoRecursive([string]$repo, [string]$dest) {
+    try {
+        New-Item -ItemType Directory -Force -Path $dest | Out-Null
+        $dir = Join-Path $dest ($repo -replace '/', '_')
+        if (Test-Path $dir) { Remove-Item $dir -Recurse -Force -EA SilentlyContinue }
+        $proxy = ''
+        try { if ($tbProxy) { $proxy = $tbProxy.Text.Trim() } } catch { }
+        $gitArgs = @()
+        if ($proxy) { $gitArgs += @('-c', ("http.proxy=" + $proxy)) }
+        $gitArgs += @('clone', '--recursive', '--depth', '1', ("https://github.com/$repo.git"), $dir)
+        $env:GIT_TERMINAL_PROMPT = '0'
+        Add-Log ("克隆（含 submodule）: {0}" -f $repo)
+        $out = & git @gitArgs 2>&1
+        $tail = ($out | Select-Object -Last 3) -join ' | '
+        Add-Log ("git clone 完成: {0}" -f $dir)
+        return $dir
+    } catch { Add-Log ("clone 失败: " + $_.Exception.Message); return '' }
+}
+
 function Pull-RaceBuildAuto($p) {
     $lines = @()
     $lines += ("repo=" + $p.repo)
@@ -1413,12 +1542,21 @@ function Pull-RaceBuildAuto($p) {
     $branch = 'main'
     try { $info = Invoke-RestMethod -Uri "https://api.github.com/repos/$($p.repo)" -Headers @{ 'User-Agent'='gta6-launcher' } -TimeoutSec 20; if ($info.default_branch) { $branch = $info.default_branch } } catch { }
     $lines += ("noReleaseUsingSource=yes branch=" + $branch)
-    Download-FromGitHub $p.repo $branch $dest
-    $zipName = ($p.repo -replace '/', '_') + "-$branch.zip"
-    $extract = Join-Path $dest ([System.IO.Path]::GetFileNameWithoutExtension($zipName))
-    $lines += ("zipExists=" + (Test-Path (Join-Path $dest $zipName)) + " path=" + (Join-Path $dest $zipName))
-    $lines += ("extractedDir=" + $extract + " exists=" + (Test-Path $extract))
-    if (-not (Test-Path $extract)) { return $lines }
+    $hasSub = Test-HasSubmodules $p.repo
+    $lines += ("hasSubmodules=" + $hasSub)
+    if ($hasSub) {
+        $repoDir = Clone-RepoRecursive $p.repo $dest
+        $lines += ("cloneDir=" + $repoDir + " exists=" + (Test-Path $repoDir))
+        if (-not $repoDir -or -not (Test-Path $repoDir)) { return $lines }
+        $extract = $repoDir
+    } else {
+        Download-FromGitHub $p.repo $branch $dest
+        $zipName = ($p.repo -replace '/', '_') + "-$branch.zip"
+        $extract = Join-Path $dest ([System.IO.Path]::GetFileNameWithoutExtension($zipName))
+        $lines += ("zipExists=" + (Test-Path (Join-Path $dest $zipName)) + " path=" + (Join-Path $dest $zipName))
+        $lines += ("extractedDir=" + $extract + " exists=" + (Test-Path $extract))
+        if (-not (Test-Path $extract)) { return $lines }
+    }
     $cargo = Find-CargoRoot $extract
     $lines += ("cargoRoot=" + $cargo)
     $found = @(Find-PrebuiltExe $extract)
@@ -1490,12 +1628,19 @@ function Pull-RaceBuild($p) {
             $info = Invoke-RestMethod -Uri "https://api.github.com/repos/$($p.repo)" -Headers @{ 'User-Agent' = 'gta6-launcher' } -TimeoutSec 20
             if ($info.default_branch) { $branch = $info.default_branch }
         } catch { }
-        Add-Log ("下载源码: {0} @ {1}" -f $p.repo, $branch)
-        Download-FromGitHub $p.repo $branch $dest
-        $zipName = ($p.repo -replace '/', '_') + "-$branch.zip"
-        $extract = Join-Path $dest ([System.IO.Path]::GetFileNameWithoutExtension($zipName))
+        Add-Log ("拉取源码: {0} @ {1}" -f $p.repo, $branch)
+        $extract = ''
+        if (Test-HasSubmodules $p.repo) {
+            Add-Log '检测到 git submodule，改用 git clone --recursive（ZIP 不含子模块）'
+            $extract = Clone-RepoRecursive $p.repo $dest
+        } else {
+            Download-FromGitHub $p.repo $branch $dest
+            $zipName = ($p.repo -replace '/', '_') + "-$branch.zip"
+            $extract = Join-Path $dest ([System.IO.Path]::GetFileNameWithoutExtension($zipName))
+        }
+        if (-not $extract -or -not (Test-Path $extract)) { Add-Log '源码下载/克隆失败'; return }
         $cargo = Find-CargoRoot $extract
-        if (-not $cargo) { Add-Log '解压后没找到 Cargo.toml（可能是非 Rust 项目）'; return }
+        if (-not $cargo) { Add-Log '没找到 Cargo.toml（可能是非 Rust 项目）'; return }
         $foundExe = Find-PrebuiltExe $cargo
         if ($foundExe -and $foundExe.Count -gt 0) {
             [void](Register-Prebuilt $foundExe[0].FullName $p.repo)
@@ -1503,7 +1648,7 @@ function Pull-RaceBuild($p) {
         }
         if (-not (Get-Command cargo -EA SilentlyContinue)) { Add-Log ("源码已下载到 {0}，但本机没有 cargo，无法编译" -f $cargo); return }
         if ([System.Windows.Forms.MessageBox]::Show(("源码已下载：`r`n{0}`r`n`r`n现在编译吗？（可能需要几分钟）" -f $cargo), '编译源码', 'YesNo', 'Question') -ne 'Yes') { Add-Log '已跳过编译'; return }
-        [void](Build-And-Deploy $cargo)
+        [void](Start-CompileAsync $cargo ($p.name + ' 拉取构建'))
     } catch { Add-Log ("拉取构建失败: " + $_.Exception.Message) }
 }
 # ---------------------------------------------------------------- 键盘映射
@@ -1715,6 +1860,7 @@ $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 250
 $timer.Add_Tick({
     try { Update-Warm } catch { Add-Log ("更新出错: " + $_.Exception.Message) }
+    try { Update-Compile } catch { }
     try {
         if ('KeyMap' -as [type]) {
             if ($script:game -and -not $script:game.HasExited) {
@@ -1771,6 +1917,27 @@ $form.Add_Shown({
     $raceTimer.Interval = 1500
     $raceTimer.Add_Tick({ $this.Stop(); try { Update-Race } catch { } })
     $raceTimer.Start()
+    if ($env:GTA6_LAUNCHER_ASYNCTEST_ROOT) {
+        try {
+            [void](Start-CompileAsync $env:GTA6_LAUNCHER_ASYNCTEST_ROOT 'asynctest')
+        } catch { }
+        $at = New-Object System.Windows.Forms.Timer
+        $at.Interval = 90000
+        $at.Add_Tick({
+            $this.Stop()
+            try {
+                $out = @(
+                    ("status=" + $lblStatus.Text),
+                    ("compileDone=" + $(if ($script:compile) { $script:compile.Done } else { 'no-compile' })),
+                    ("compileOk=" + $(if ($script:compile) { $script:compile.Ok } else { 'no-compile' })),
+                    ("buildsNow=" + @($script:builds).Count)
+                )
+                Set-Content -Path $env:GTA6_LAUNCHER_ASYNCTEST_ROOT_OUT -Value ($out -join "`r`n") -Encoding UTF8
+            } catch { }
+            $form.Close()
+        })
+        $at.Start()
+    }
     if ($env:GTA6_LAUNCHER_LAYOUTTEST) {
         try {
             $lines = @()
@@ -1969,5 +2136,5 @@ if ($env:GTA6_LAUNCHER_CHECKUPDATE) {
 
 $lblAuthor = New-Label '作者: DKTTT (github.com/DKTTT)  ·  基于 VIctory 社区项目 (avatarmanz / trustno1-coder / fxceless / codec-d)  ·  v1.0' 16 776 1012 20 8.5 $Muted
 $form.Controls.Add($lblAuthor)
-Add-Log 'GTA VI 自动启动器 v1.8.0 by DKTTT'
+Add-Log 'GTA VI 自动启动器 v1.8.1 by DKTTT'
 [void]$form.ShowDialog()
