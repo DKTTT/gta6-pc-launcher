@@ -309,6 +309,10 @@ $chkOpenDir.Location = New-Object System.Drawing.Point(14, 214)
 $chkOpenDir.Size = New-Object System.Drawing.Size(300, 24)
 $chkOpenDir.ForeColor = $TextCol; $chkOpenDir.BackColor = $Bg; $chkOpenDir.Checked = $true
 $tabRun.Controls.Add($chkOpenDir)
+$lblCrash = New-Label '崩溃记录：0 次 / 10（满 10 次自动清理日志）' 14 248 720 22 9
+$tabRun.Controls.Add($lblCrash)
+$btnOpenLogs = New-Btn '打开日志目录' 748 244 226 32
+$tabRun.Controls.Add($btnOpenLogs)
 
 # ---------------- Tab4: 排行榜 ----------------
 $tabRace.Controls.Add((New-Label 'GTA VI PC Race 排行榜（每次启动自动更新）' 14 12 500 22 10))
@@ -388,6 +392,11 @@ $script:race = $null
 $script:raceRec = $null
 $script:mapperWanted = $false
 $script:raceList = @()
+$script:logDir = Join-Path $Root 'logs'
+$script:gameLog = $null
+$script:gameStart = $null
+$script:crashFile = Join-Path $script:logDir 'crashes.jsonl'
+$script:crashCount = 0
 $script:raceCache = Join-Path $Root 'race-cache.json'
 $script:outLog = Join-Path $env:TEMP 'gta6-launcher-warm.out.log'
 $script:errLog = Join-Path $env:TEMP 'gta6-launcher-warm.err.log'
@@ -721,8 +730,13 @@ function Launch-Game {
         Save-Cfg
         Add-Log ("启动: {0} / {1} / {2}p (scale {3})" -f $script:buildName, $envInfo.Console, $envInfo.Height, $envInfo.Scale)
         Add-Log ("缓存: {0}" -f $script:cacheDir)
+        New-Item -ItemType Directory -Force -Path $script:logDir | Out-Null
+        $script:gameLog = Join-Path $script:logDir ("game-" + (Get-Date -Format 'yyyyMMdd-HHmmss') + ".log")
+        $script:gameStart = Get-Date
         $script:game = Start-Process -FilePath $script:exe -ArgumentList @('run', $gameExe, '--execute', '--console', $envInfo.Console) `
-            -WorkingDirectory (Split-Path $script:exe) -PassThru
+            -WorkingDirectory (Split-Path $script:exe) -PassThru `
+            -RedirectStandardOutput $script:gameLog -RedirectStandardError ($script:gameLog + '.err')
+        Add-Log ("游戏日志: {0}" -f $script:gameLog)
         Add-Log ("游戏已启动 PID={0}" -f $script:game.Id)
         if ($chkKeyAuto.Checked) {
             Start-Sleep -Milliseconds 800
@@ -993,6 +1007,11 @@ function Update-Race {
         }
         $lstRace.Items.Clear()
         $script:raceList = @()
+$script:logDir = Join-Path $Root 'logs'
+$script:gameLog = $null
+$script:gameStart = $null
+$script:crashFile = Join-Path $script:logDir 'crashes.jsonl'
+$script:crashCount = 0
         foreach ($p in @($data.projects | Sort-Object pos | Select-Object -First 25)) {
             $repoTxt = if ($p.repo) { $p.repo } else { '(无公开代码)' }
             $lstRace.Items.Add(("{0,2}. {1,-22} st{2}  画面{3}/5 速度{4}/6 稳定{5}/4   {6}" -f $p.pos, $p.name, $p.stage, (LaneStep $p.lanes.picture), (SpeedStep $p.lanes.speed), (StabilityStep $p.lanes.stability), $repoTxt)) | Out-Null
@@ -1406,9 +1425,72 @@ function Stop-Mapper {
         if ('KeyMap' -as [type]) { [KeyMap]::Uninstall() }
         $script:mapperWanted = $false
 $script:raceList = @()
+$script:logDir = Join-Path $Root 'logs'
+$script:gameLog = $null
+$script:gameStart = $null
+$script:crashFile = Join-Path $script:logDir 'crashes.jsonl'
+$script:crashCount = 0
         $lblKeyStatus.Text = '映射已停止'
         Add-Log '键盘映射已停止'
     } catch { }
+}
+
+# ---------------------------------------------------------------- 崩溃记录与自动清理
+function Get-CrashCount {
+    try {
+        if (-not (Test-Path $script:crashFile)) { return 0 }
+        return @(Get-Content $script:crashFile -EA SilentlyContinue | Where-Object { $_.Trim() }).Count
+    } catch { return 0 }
+}
+
+function Update-CrashLabel {
+    try {
+        $script:crashCount = Get-CrashCount
+        if ($lblCrash) {
+            $lblCrash.Text = ("崩溃记录：{0} 次 / 10（满 10 次自动清理日志）" -f $script:crashCount)
+        }
+    } catch { }
+}
+
+function Auto-Clean-Crashes {
+    try {
+        New-Item -ItemType Directory -Force -Path $script:logDir | Out-Null
+        $archive = Join-Path $script:logDir ("crashes-archive-" + (Get-Date -Format 'yyyyMMdd-HHmmss') + ".jsonl")
+        if (Test-Path $script:crashFile) { Move-Item $script:crashFile $archive -Force }
+        Set-Content -Path $script:crashFile -Value ('{"event":"auto-cleaned","time":"' + (Get-Date).ToString('o') + '"}') -Encoding UTF8
+        # 只保留最近 2 个游戏日志，其余删除
+        $logs = @(Get-ChildItem $script:logDir -Filter 'game-*.log' -EA SilentlyContinue | Sort-Object LastWriteTime -Descending)
+        for ($i = 2; $i -lt $logs.Count; $i++) { Remove-Item $logs[$i].FullName -Force -EA SilentlyContinue }
+        Add-Log ('崩溃记录已达 10 次：旧日志已归档到 {0}，游戏日志仅保留最近 2 个' -f (Split-Path $archive -Leaf))
+        Update-CrashLabel
+    } catch { Add-Log ("自动清理崩溃日志失败: " + $_.Exception.Message) }
+}
+
+function Record-Crash([string]$reason, $tail) {
+    try {
+        New-Item -ItemType Directory -Force -Path $script:logDir | Out-Null
+        $entry = [pscustomobject]@{
+            time = (Get-Date).ToString('o')
+            reason = $reason
+            build = $script:buildName
+            console = $(if ($rbSX.Checked) { 'series-x' } else { 'series-s' })
+            height = $(if ($rbAutoRes.Checked) { 'auto' } else { ($heights | Where-Object { $rbResMap[$_].Checked } | Select-Object -First 1) })
+            cacheDir = $script:cacheDir
+            gameLog = $script:gameLog
+            ranSeconds = $(if ($script:gameStart) { [math]::Round(((Get-Date) - $script:gameStart).TotalSeconds, 1) } else { 0 })
+            tail = @($tail | Select-Object -Last 30)
+        }
+        Add-Content -Path $script:crashFile -Value ($entry | ConvertTo-Json -Depth 5 -Compress) -Encoding UTF8
+        # 单独存一份完整尾部，方便排查
+        if ($tail -and $tail.Count -gt 0) {
+            $dump = Join-Path $script:logDir ("crash-" + (Get-Date -Format 'yyyyMMdd-HHmmss') + ".log")
+            Set-Content -Path $dump -Value ($tail -join "`r`n") -Encoding UTF8
+        }
+        $script:crashCount = Get-CrashCount
+        Add-Log ("已记录崩溃 #{0}：{1}（运行 {2} 秒）" -f $script:crashCount, $reason, $entry.ranSeconds)
+        Update-CrashLabel
+        if ($script:crashCount -ge 10) { Auto-Clean-Crashes }
+    } catch { Add-Log ("记录崩溃失败: " + $_.Exception.Message) }
 }
 
 # ---------------------------------------------------------------- 事件
@@ -1449,6 +1531,12 @@ $btnWarmPipes.Add_Click({ Start-Warm 'pipelines' })
 $btnWarmAll.Add_Click({ Start-Warm 'all' })
 $btnStop.Add_Click({ Stop-Warm })
 $btnLaunch.Add_Click({ Launch-Game })
+$btnOpenLogs.Add_Click({
+    try {
+        New-Item -ItemType Directory -Force -Path $script:logDir | Out-Null
+        Start-Process 'explorer.exe' $script:logDir
+    } catch { }
+})
 
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 250
@@ -1468,8 +1556,21 @@ $timer.Add_Tick({
     } catch { }
     try {
         if ($script:game -and $script:game.HasExited) {
-            Add-Log ("游戏已退出（{0}）" -f $script:game.ExitCode)
-            $script:game = $null; $btnLaunch.Enabled = $true; $lblStatus.Text = '游戏已退出'
+            $code = $null
+            try { $null = $script:game.WaitForExit(1000); $code = $script:game.ExitCode; if ("$code" -eq '') { $code = $null } } catch { }
+            $ran = if ($script:gameStart) { ((Get-Date) - $script:gameStart).TotalSeconds } else { 0 }
+            $tail = @()
+            foreach ($lf in @($script:gameLog, $(if ($script:gameLog) { $script:gameLog + '.err' } else { $null }))) {
+                if ($lf -and (Test-Path $lf)) { $tail += @(Get-Content $lf -Tail 80 -EA SilentlyContinue) }
+            }
+            $text = ($tail -join "`n")
+            $crash = $false; $reason = ''
+            if ($text -match 'upload_file_minidump|BacktraceBreakpad|panic|device removed|0x887A0006|DXGI_ERROR_DEVICE') { $crash = $true; $reason = 'breakpad/设备移除/panic' }
+            elseif ($null -ne $code -and $code -ne 0) { $crash = $true; $reason = ("退出码 {0}" -f $code) }
+            elseif ($ran -gt 0 -and $ran -lt 10) { $crash = $true; $reason = ("启动 {0} 秒即退出" -f [math]::Round($ran, 1)) }
+            if ($crash) { Record-Crash $reason $tail } else { Add-Log ("游戏正常退出（运行 {0:N0} 秒）" -f $ran) }
+            $script:game = $null; $script:gameStart = $null
+            $btnLaunch.Enabled = $true; $lblStatus.Text = '游戏已退出'
         }
     } catch { }
 })
@@ -1485,6 +1586,10 @@ $form.Add_Shown({
     Refresh-Hw
     Scan-Builds
     try {
+        New-Item -ItemType Directory -Force -Path $script:logDir | Out-Null
+        Update-CrashLabel
+    } catch { }
+    try {
         if ($Cfg.KeyMap) { $txtKeyMap.Text = $Cfg.KeyMap }
         else { $txtKeyMap.Text = "# 每行一条：源键 = 目标键`r`n# CapsLock = Escape`r`n# F1 = Tab" }
         if ($Cfg.ContainsKey('KeyMapOn')) { $chkKeyAuto.Checked = [bool]$Cfg.KeyMapOn }
@@ -1493,6 +1598,22 @@ $form.Add_Shown({
     $raceTimer.Interval = 1500
     $raceTimer.Add_Tick({ $this.Stop(); try { Update-Race } catch { } })
     $raceTimer.Start()
+    if ($env:GTA6_LAUNCHER_CRASHTEST) {
+        try {
+            New-Item -ItemType Directory -Force -Path $script:logDir | Out-Null
+            Remove-Item $script:crashFile -EA SilentlyContinue
+            $simTail = @('BacktraceBreakpad', "Added file 'upload_file_minidump'", '0x887A0006 DXGI_ERROR_DEVICE_HUNG')
+            for ($k = 1; $k -le 11; $k++) { Record-Crash ("模拟崩溃 #" + $k) $simTail }
+            $lines = @()
+            $lines += ("crashFile=" + $script:crashFile)
+            $lines += ("crashEntries=" + (Get-CrashCount))
+            $lines += ("logFiles=" + @(Get-ChildItem $script:logDir -Filter 'game-*.log' -EA SilentlyContinue).Count)
+            $lines += ("archives=" + @(Get-ChildItem $script:logDir -Filter 'crashes-archive-*' -EA SilentlyContinue).Count)
+            $lines += ("label=" + $lblCrash.Text)
+            Set-Content -Path $env:GTA6_LAUNCHER_CRASHTEST -Value ($lines -join "`r`n") -Encoding UTF8
+        } catch { Set-Content -Path $env:GTA6_LAUNCHER_CRASHTEST -Value ("ERR " + $_.Exception.Message) -Encoding UTF8 }
+        $form.Close()
+    }
     if ($env:GTA6_LAUNCHER_PULLTEST_REPO) {
         try {
             $repo = $env:GTA6_LAUNCHER_PULLTEST_REPO.Trim()
@@ -1653,5 +1774,5 @@ if ($env:GTA6_LAUNCHER_CHECKUPDATE) {
 
 $lblAuthor = New-Label '作者: DKTTT (github.com/DKTTT)  ·  基于 VIctory 社区项目 (avatarmanz / trustno1-coder / fxceless / codec-d)  ·  v1.0' 16 776 1012 20 8.5 $Muted
 $form.Controls.Add($lblAuthor)
-Add-Log 'GTA VI 自动启动器 v1.5 by DKTTT'
+Add-Log 'GTA VI 自动启动器 v1.6 by DKTTT'
 [void]$form.ShowDialog()

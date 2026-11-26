@@ -152,3 +152,12 @@ W = Up
   4. 找到 `target\{diag,release}\victory.exe` 后**复制到规范构建目录并自动登记**
   5. 自动刷新 ② 构建列表，可直接选它去预热/启动
 - **实测**：拉取 `avatarmanz/VIctory-7900XTX`（无 Release）→ 下载 2.2MB 源码 → 编译 1m35s → 得到 11.2MB `victory.exe` → 构建列表 16→17，可直接使用
+
+## v1.6 更新：崩溃记录 + 满 10 次自动清理
+
+- **每次启动游戏自动记录日志**：输出重定向到 `logs\game-时间.log`（victory 的日志在 `.log.err`）
+- **自动判定崩溃**：Breakpad/minidump、panic、设备移除（0x887A0006 / DXGI_ERROR_DEVICE）、非 0 退出码、启动 10 秒内退出
+- **崩溃记录**：写入 `logs\crashes.jsonl`（时间/原因/构建/主机模式/分辨率/缓存目录/运行秒数/最后 30 行日志），并另存 `crash-时间.log`
+- **③ 页显示崩溃次数**：`崩溃记录：N 次 / 10`
+- **满 10 次自动清理**：crashes.jsonl 归档为 `crashes-archive-时间.jsonl`，游戏日志只保留最近 2 个
+- **「打开日志目录」按钮**：一键打开 `logs` 目录
