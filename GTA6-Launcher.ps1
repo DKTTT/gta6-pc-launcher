@@ -1,4 +1,4 @@
-﻿# GTA VI PC 移植 - 自动检测启动器 v1.10.1
+﻿# GTA VI PC 移植 - 自动检测启动器 v1.10.2
 # 功能：检测硬件 -> 推荐构建与画质；自定义路径；从 GitHub 下载构建；预热；启动
 # 运行：双击同目录 GTA6-Launcher.bat
 
@@ -913,6 +913,48 @@ $tabRun.Controls.Add($lblCrash)
 $btnOpenLogs = New-Btn '打开日志目录' 748 244 226 32
 $tabRun.Controls.Add($btnOpenLogs)
 
+# ---------------- TDR 超时设置（修 GPU「设备移除」崩溃） ----------------
+$btnTdr = New-Btn '设置 TDR 超时（设备移除）' 14 288 300 32
+$lblTdr = New-Label 'TDR: 读取中…' 330 294 620 22 9 $Muted
+$tabRun.Controls.Add($btnTdr); $tabRun.Controls.Add($lblTdr)
+function Get-TdrInfo {
+    try {
+        $k = 'HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers'
+        $d = (Get-ItemProperty $k -Name TdrDelay -EA SilentlyContinue).TdrDelay
+        $l = (Get-ItemProperty $k -Name TdrLevel -EA SilentlyContinue).TdrLevel
+        return [pscustomobject]@{ Delay = $d; Level = $l }
+    } catch { return [pscustomobject]@{ Delay = $null; Level = $null } }
+}
+function Update-TdrLabel {
+    try {
+        $i = Get-TdrInfo
+        if ($null -ne $i.Delay -and [int]$i.Delay -gt 0) {
+            $lblTdr.Text = "TDR: 当前 $($i.Delay) 秒（改完需重启电脑生效）"
+            $lblTdr.ForeColor = $(if ([int]$i.Delay -ge 10) { $Green } else { $Muted })
+        } else {
+            $lblTdr.Text = 'TDR: 当前默认（约 2 秒，长帧/编译时容易「设备移除」）'
+            $lblTdr.ForeColor = $Muted
+        }
+    } catch { }
+}
+$btnTdr.Add_Click({
+    try {
+        $form.Enabled = $false
+        $i = Get-TdrInfo
+        $cur = if ($null -ne $i.Delay -and [int]$i.Delay -gt 0) { "$($i.Delay) 秒" } else { '默认（约 2 秒）' }
+        $msg = "TDR（GPU 超时）当前：$cur`r`n`r`n游戏出现「设备移除 / 驱动重置」崩溃时，把超时调到 60 秒通常能解决。`r`n需要管理员权限写注册表，改完要重启电脑。`r`n`r`n现在设置为 60 秒？"
+        $r = [System.Windows.Forms.MessageBox]::Show($msg, '设置 TDR 超时', 'YesNo', 'Question')
+        if ($r -ne 'Yes') { Add-Log 'TDR 设置已取消'; return }
+        $regArgs = @('add', 'HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers', '/v', 'TdrDelay', '/t', 'REG_DWORD', '/d', '60', '/f')
+        $p = Start-Process -FilePath 'reg.exe' -ArgumentList $regArgs -Verb RunAs -PassThru -WindowStyle Hidden -Wait
+        if ($p.ExitCode -eq 0) { Add-Log '✅ TdrDelay 已设置为 60 秒（重启电脑后生效）' } else { Add-Log ("❌ TdrDelay 写入失败（退出码 {0}）" -f $p.ExitCode) }
+        Update-TdrLabel
+    } catch {
+        if ($_.Exception.Message -match 'cancel|取消') { Add-Log 'TDR 设置已取消（没有拿到管理员权限）' } else { Add-Log ("TDR 设置失败: " + $_.Exception.Message) }
+    } finally { try { $form.Enabled = $true } catch { } }
+})
+Update-TdrLabel
+
 # ---------------- Tab4: 排行榜 ----------------
 $tabRace.Controls.Add((New-Label 'GTA VI PC Race 排行榜（每次启动自动更新）' 14 12 500 22 10))
 $lblRaceUpdated = New-Label '尚未更新' 500 12 470 22 9 $Muted
@@ -1387,6 +1429,15 @@ function Select-Build {
     $script:dataDir = $dirs.Data
     New-Item -ItemType Directory -Force -Path $script:cacheDir, $script:dataDir -EA SilentlyContinue | Out-Null
     Add-Log ("选中构建: {0} -> {1}" -f $script:buildName, $b.Exe)
+    # N 卡 + legacy/[exe] 构建：光追跳过只在 diag 构建生效，legacy 在 N 卡上容易「设备移除」
+    try {
+        if ($script:hw -and $script:hw.Vendor -eq 'NVIDIA') {
+            $capW = Get-BuildResCapability $b.Exe
+            if ($capW.Legacy -or ($b.Profile -notin @('diag', 'release'))) {
+                Add-Log ("⚠️ 警告: 当前是 {0} 构建（legacy/[exe]），VICTORY_SKIP_PIPELINES 不生效，光追关不掉 → N 卡上容易「设备移除」崩溃。建议改用 vf-nvidia 的 diag 构建。" -f $b.Profile)
+            }
+        }
+    } catch { }
     $r = Update-CacheStateLabel
     if ($r) {
         Add-Log ("  版本: {0}  {1}  {2}" -f $r.Ver, $r.Tr, $r.State.Text)
