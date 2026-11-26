@@ -624,3 +624,14 @@ releaseAssets=0 → 自动转源码 ZIP
 ### 新增
 - **设置 TDR 超时按钮**（运行页）：一键把 GPU 超时从默认 ~2 秒调到 60 秒，用于修复「设备移除 / 驱动重置」崩溃（需要管理员权限，改完重启生效）；页面常驻显示当前 TDR 值
 - **N 卡 + legacy/[exe] 构建警告**：选中 legacy（不支持 RENDER_SCALE）或非 diag/release 的 [exe] 构建时，日志明确提示「VICTORY_SKIP_PIPELINES 不生效、光追关不掉、容易设备移除」，并建议改用 vf-nvidia 的 diag 构建
+
+## [v1.10.3] - 2026-11-27
+
+### 改进
+- **所有构建共用同一份存档**：DATA_DIR 统一为 `<存档根>\perf-data`，换构建/换分支不再丢进度、不用搬存档
+- 配置建议：CacheRoot=E:\gta6（复用已预热缓存）、SaveRoot=E:\gta6\work（现有存档）、Height=720
+
+### 使用（复现 ~15-17fps）
+1. 构建选 `vf-nvidia [diag]`（release/legacy 不行，光追跳过不生效）
+2. 勾选「关闭光追」、分辨率 720p（想再快选 480p）
+3. 点「检查预热状态」确认缓存 OK（E:\gta6\cache-nvidia 已预热），然后启动

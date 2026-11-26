@@ -1,4 +1,4 @@
-﻿# GTA VI PC 移植 - 自动检测启动器 v1.10.2
+﻿# GTA VI PC 移植 - 自动检测启动器 v1.10.3
 # 功能：检测硬件 -> 推荐构建与画质；自定义路径；从 GitHub 下载构建；预热；启动
 # 运行：双击同目录 GTA6-Launcher.bat
 
@@ -1315,10 +1315,10 @@ function Get-BuildDirs([string]$name) {
         'vf-main'   = @{ Cache = 'cache-upstream'; Data = 'perf-data-up' }
         'cool_fox'  = @{ Cache = 'cache-coolfox'; Data = 'perf-data-cool' }
     }
-    if ($known.ContainsKey($name)) {
-        return @{ Cache = (Combine-Path $cacheBase $known[$name].Cache); Data = (Combine-Path $saveBase $known[$name].Data) }
-    }
-    return @{ Cache = (Combine-Path $cacheBase ("cache-" + $name)); Data = (Combine-Path $saveBase ("perf-data-" + $name)) }
+    $cacheDir = if ($known.ContainsKey($name)) { Combine-Path $cacheBase $known[$name].Cache } else { Combine-Path $cacheBase ("cache-" + $name) }
+    # v1.10.3: 所有构建共用同一份存档（DATA_DIR = <存档根>\perf-data），换构建不用搬存档
+    $sharedData = Combine-Path $saveBase 'perf-data'
+    return @{ Cache = $cacheDir; Data = $sharedData }
 }
 
 # 这个构建支持哪些预热步骤（旧版 victory.exe 没有 warm / shaders 子命令）
