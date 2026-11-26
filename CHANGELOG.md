@@ -8,14 +8,6 @@ GTA VI PC 移植 · 自动启动器 ｜ 作者：DKTTT
 
 ---
 
-## [v1.9.6] - 2026-11-27
-
-### 修复（排行榜页那一行文字被窗口边缘截断）
-
-「本地构建在榜：xxx#11 | yyy#27 | …」原来是一个横向宽度固定的标签，构建一多就被窗口右边切掉，看不到后面几个。现在换成**可横向滚动的只读框**（高度同一行，位置不变），内容一个字不少，拖动下方滑条即可看完；点进去也能全选复制。
-
----
-
 ## [v1.9.5] - 2026-11-27
 
 ### 目录全部自己扫描（不再内置任何“作者机器”的路径）
@@ -414,3 +406,22 @@ releaseAssets=0 → 自动转源码 ZIP
 ### 验证
 - ENVDUMP 实测：legacy 构建 → `RESOLUTION=960x540 WINDOW_PERCENT=88`；新构建 → `RENDER_SCALE=0.5 WINDOW_PERCENT=88`
 - bat 顺序验证：`set` 行（22-24）在 `victory.exe run`（25）之前
+
+## [v1.9.6] - 2026-11-27
+
+### 新增
+- NVIDIA 最佳性能配置默认全开：`VICTORY_TEXTURE_NO_WAIT=1`、`VICTORY_D3D12_DRED=light`（其余 play-nvidia 设置 v1.9.5 已含）
+- 自动读取构建目录的 `scripts\rt_off_hashes.txt` → `VICTORY_SKIP_PIPELINES`（关掉光追 pass，**帧率翻倍**：150ms → 81ms，热缓存 58-66ms）
+
+### 实测（RTX 3070 Ti Laptop 8GB，vf-nvidia diag 构建）
+| 分辨率 | 帧时间 | fps |
+|---|---|---|
+| 480p | 58.5 ms | 17.1 |
+| 540p | 63.1 ms | 15.9 |
+| 720p | 66.5 ms | 15.0 |
+
+- 720p 为甜点（比 540p 只慢 3.4ms，画面明显更好）
+- 已合并 trustno1/VIctory-NVIDIA 最新 4 个提交（PR #1 buffer compare state decay、PR #2 ambient depth SRV）
+
+### 修复
+- `VICTORY_TEXTURE_NO_WAIT` 由 0 改为 1（速度设置）
