@@ -181,3 +181,15 @@ W = Up
 - 全部失败时弹窗明确提示，并告诉你目录应包含的结构：
   `工程名\target\diag\victory.exe` 或 `工程名\target\release\victory.exe`
 - 扫描深度 6 层，支持下载的源码工程（downloaded\repo-main\...\target\...）
+
+## v1.7.2 修复：任意盘的构建都能扫到（用户实测反馈）
+
+**问题**：用户的构建在 `D:\gta6\work`（不是 E 盘），且很多是 Release 解压版——`victory.exe` 直接放在文件夹里，不在 `target\diag|release\` 结构下，旧扫描器全部漏掉。
+
+**修复**：
+- 扫描器支持 **任意位置的 `victory*.exe`**（排除 target\...\deps、launcher），识别为 `[exe]` 预编译构建
+- 标准 `target\diag|release\victory.exe` 仍显示 `[diag]/[release]`
+- 自动兜底目录扩展：`E:\gta6\work`、`D:\gta6\work`、`%USERPROFILE%\gta6\work`、启动器目录\work、启动器目录，以及 **所有盘符的 `X:\gta6\work` 和 `X:\gta6`**
+- 实测：本机 17 个标准构建 + 10 个预编译 = **27 个构建全部识别**
+
+> 注意：`downloaded\cool_fox-main` 这类是源码 ZIP，没有 victory.exe，需要编译后才会出现（用「拉取选中项目构建」时选编译，或点「编译选中的源码构建」）。

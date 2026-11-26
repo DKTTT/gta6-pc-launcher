@@ -520,6 +520,7 @@ function Refresh-Hw {
 function Find-VictoryBuilds([string]$root) {
     $found = @()
     if (-not $root -or -not (Test-Path $root)) { return @() }
+    # 1) 标准构建：*/target/diag|release/victory.exe
     foreach ($profile in 'diag', 'release') {
         Get-ChildItem $root -Recurse -Depth 6 -Filter 'victory.exe' -EA SilentlyContinue |
             Where-Object { $_.FullName -match "\\target\\$profile\\victory\.exe$" } |
@@ -531,7 +532,17 @@ function Find-VictoryBuilds([string]$root) {
                 }
             }
     }
-    return @($found | Sort-Object Project, Profile -Unique)
+    # 2) 预编译/Release 解压版：任意位置的 victory*.exe（排除 deps 和 launcher）
+    Get-ChildItem $root -Recurse -Depth 6 -Filter 'victory*.exe' -EA SilentlyContinue |
+        Where-Object { $_.FullName -notmatch '\\target\\' -and $_.FullName -notmatch '\\deps\\' -and $_.Name -notmatch 'launcher' } |
+        ForEach-Object {
+            $proj = Split-Path $_.FullName -Parent
+            $found += [pscustomobject]@{
+                Name = (Split-Path $proj -Leaf); Project = $proj; Exe = $_.FullName
+                Profile = 'exe'; SizeMB = [math]::Round($_.Length / 1MB, 1); Time = $_.LastWriteTime
+            }
+        }
+    return @($found | Sort-Object Exe -Unique | Sort-Object @{Expression={ if($_.Profile -in @('diag','release')){0}else{1} }}, Project, Profile)
 }
 
 function Scan-Builds {
@@ -546,7 +557,13 @@ function Scan-Builds {
             (Join-Path $env:USERPROFILE 'gta6\work'),
             (Join-Path $Root 'work'),
             $Root
-        ) | Where-Object { $_ -and ($_ -ne $root) } | Select-Object -Unique
+        )
+        $driveCands = @()
+        foreach ($d in @(Get-PSDrive -PSProvider FileSystem -EA SilentlyContinue)) {
+            $driveCands += ($d.Name + ':\gta6\work')
+            $driveCands += ($d.Name + ':\gta6')
+        }
+        $candidates = @($candidates + $driveCands) | Where-Object { $_ -and ($_ -ne $root) } | Select-Object -Unique
         foreach ($c in $candidates) {
             if (-not (Test-Path $c)) { continue }
             $tryFound = @(Find-VictoryBuilds $c)
@@ -1874,5 +1891,5 @@ if ($env:GTA6_LAUNCHER_CHECKUPDATE) {
 
 $lblAuthor = New-Label '作者: DKTTT (github.com/DKTTT)  ·  基于 VIctory 社区项目 (avatarmanz / trustno1-coder / fxceless / codec-d)  ·  v1.0' 16 776 1012 20 8.5 $Muted
 $form.Controls.Add($lblAuthor)
-Add-Log 'GTA VI 自动启动器 v1.7.1 by DKTTT'
+Add-Log 'GTA VI 自动启动器 v1.7.2 by DKTTT'
 [void]$form.ShowDialog()
