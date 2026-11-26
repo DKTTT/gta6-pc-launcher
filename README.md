@@ -139,3 +139,16 @@ W = Up
 - 没有公开仓库的项目（如 CGBJ/ztrx）会提示无法拉取。
 
 > 📖 完整使用手册见 **使用教程-详细版.md**（15 个章节：界面总览/每个按钮/配置文件/疑难排查/性能建议/FAQ）。
+
+## v1.5 更新：排行榜拉取构建（真实可部署）
+
+- **没有 Release 也能拉**：自动检测 Release；没有可用附件时弹窗
+  `没有 Release，是否改为下载源码 ZIP？ 是=下载 否=取消`
+- **格式自适应**：Release 附件支持 `zip / 7z / tar.gz / tgz / exe`（7z 需要装 7-Zip，tar.gz 用系统 tar）；源码 ZIP 自动解压并自动定位工程根目录（Cargo.toml）
+- **自动编译 + 自动部署**：
+  1. 下载源码并解压
+  2. 自动找 Cargo.toml（支持嵌套目录）
+  3. 自动编译：先试 `cargo build --profile diag -p victory --features diagnostics`，失败自动改 `cargo build --release`
+  4. 找到 `target\{diag,release}\victory.exe` 后**复制到规范构建目录并自动登记**
+  5. 自动刷新 ② 构建列表，可直接选它去预热/启动
+- **实测**：拉取 `avatarmanz/VIctory-7900XTX`（无 Release）→ 下载 2.2MB 源码 → 编译 1m35s → 得到 11.2MB `victory.exe` → 构建列表 16→17，可直接使用

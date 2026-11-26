@@ -503,7 +503,7 @@ function Scan-Builds {
     if (-not (Test-Path $root)) { Add-Log "构建根目录不存在: $root"; return }
     $found = @()
     foreach ($profile in 'diag', 'release') {
-        Get-ChildItem $root -Recurse -Depth 3 -Filter 'victory.exe' -EA SilentlyContinue |
+        Get-ChildItem $root -Recurse -Depth 6 -Filter 'victory.exe' -EA SilentlyContinue |
             Where-Object { $_.FullName -match "\\target\\$profile\\victory.exe$" } |
             ForEach-Object {
                 $proj = $_.FullName -replace "\\target\\$profile\\victory\.exe$", ''
@@ -1081,42 +1081,87 @@ function Get-RaceCompat($p) {
     return [pscustomobject]@{ Ok = ($reasons.Count -eq 0); Reasons = $reasons }
 }
 
-function Pull-RaceBuild($p) {
+function Get-ReleaseAssets([string]$repo) {
+    $out = @()
     try {
-        if (-not $p) { Add-Log '先在排行榜列表里选一个项目'; return }
-        if (-not $p.repo) { [System.Windows.Forms.MessageBox]::Show('该项目没有公开仓库（可能已删除/私有），无法拉取。', '无法拉取'); return }
-        $compat = Get-RaceCompat $p
-        if (-not $compat.Ok) {
-            $hw = $script:hw
-            $msg = ("选中项目：{0}（榜上第 {1} 名）`r`n测试硬件：{2}`r`n`r`n可能的适配问题：`r`n  - {3}`r`n`r`n你的配置：{4} / {5} GB 显存 / {6} GB 内存`r`n`r`n仍然继续拉取并构建吗？`r`n  是 = 继续`r`n  否 = 取消" -f $p.name, $p.pos, ((@($p.tested.gpu) -join ', ')), ($compat.Reasons -join "`r`n  - "), $hw.Vendor, [math]::Round($hw.VramMB/1024,0), $hw.RamGB)
-            $r = [System.Windows.Forms.MessageBox]::Show($msg, '配置可能不适配', 'YesNo', 'Warning')
-            if ($r -ne 'Yes') { Add-Log ("已取消拉取 {0}（配置不适配）" -f $p.name); return }
+        $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases/latest" -Headers @{ 'User-Agent' = 'gta6-launcher' } -TimeoutSec 20
+        foreach ($a in @($rel.assets)) { $out += [pscustomobject]@{ Name = $a.name; Size = [int64]$a.size; Url = $a.browser_download_url } }
+    } catch { }
+    return $out
+}
+
+function Expand-Any([string]$file, [string]$dest) {
+    try {
+        New-Item -ItemType Directory -Force -Path $dest | Out-Null
+        $ext = [System.IO.Path]::GetExtension($file).ToLower()
+        $low = $file.ToLower()
+        if ($ext -eq '.zip') {
+            Expand-Archive -Path $file -DestinationPath $dest -Force
+            return $true
         }
-        $choice = [System.Windows.Forms.MessageBox]::Show(("拉取 {0}：`r`n{1}`r`n`r`n  是 = 下载源码并编译`r`n  否 = 只下载源码 ZIP`r`n  取消 = 不拉取" -f $p.name, $p.repo), '拉取构建', 'YesNoCancel', 'Question')
-        if ($choice -eq 'Cancel') { return }
-        $branch = 'main'
-        try {
-            $info = Invoke-RestMethod -Uri "https://api.github.com/repos/$($p.repo)" -Headers @{ 'User-Agent' = 'gta6-launcher' } -TimeoutSec 20
-            if ($info.default_branch) { $branch = $info.default_branch }
-        } catch { }
-        $dest = $tbDlDir.Text.Trim()
-        Add-Log ("拉取 {0} @ {1} → {2}" -f $p.repo, $branch, $dest)
-        Download-FromGitHub $p.repo $branch $dest
-        if ($choice -eq 'Yes') {
-            $zipName = ($p.repo -replace '/', '_') + "-$branch.zip"
-            $extract = Join-Path $dest ([System.IO.Path]::GetFileNameWithoutExtension($zipName))
-            if (-not (Test-Path $extract)) { Add-Log '未找到解压目录，无法编译'; return }
-            $proj = Get-ChildItem $extract -Directory -EA SilentlyContinue | Where-Object { Test-Path (Join-Path $_.FullName 'Cargo.toml') } | Select-Object -First 1
-            $root = if ($proj) { $proj.FullName } else { $extract }
-            if (-not (Test-Path (Join-Path $root 'Cargo.toml'))) { Add-Log '未找到 Cargo.toml，跳过编译'; return }
-            if (-not (Get-Command cargo -EA SilentlyContinue)) { Add-Log '没有 cargo，跳过编译（可自行编译）'; return }
-            Add-Log ("开始编译（可能几分钟）: {0}" -f $root)
-            $bLog = Join-Path $env:TEMP ("gta6-race-build-" + [System.IO.Path]::GetFileName($root) + ".log")
-            Remove-Item $bLog -EA SilentlyContinue
+        if ($low.EndsWith('.tar.gz') -or $low.EndsWith('.tgz')) {
+            $tar = Get-Command tar.exe -EA SilentlyContinue
+            if ($tar) { & tar.exe -xzf $file -C $dest 2>&1 | Out-Null; return $true }
+            return $false
+        }
+        if ($ext -eq '.7z') {
+            $seven = @('C:\Program Files\7-Zip\7z.exe', 'C:\Program Files (x86)\7-Zip\7z.exe') | Where-Object { Test-Path $_ } | Select-Object -First 1
+            if (-not $seven) { $seven = (Get-Command 7z.exe -EA SilentlyContinue).Source }
+            if ($seven) { & $seven x $file "-o$dest" -y 2>&1 | Out-Null; return $true }
+            return $false
+        }
+        if ($ext -eq '.exe') { return $true }  # 单文件直接保留
+        return $false
+    } catch { return $false }
+}
+
+function Find-PrebuiltExe([string]$dir) {
+    try {
+        return @(Get-ChildItem $dir -Recurse -File -Filter 'victory*.exe' -EA SilentlyContinue | Where-Object { $_.Name -notmatch 'launcher' } | Sort-Object Length -Descending | Select-Object -First 1)
+    } catch { return @() }
+}
+
+function Find-CargoRoot([string]$dir) {
+    try {
+        if (Test-Path (Join-Path $dir 'Cargo.toml')) { return $dir }
+        $sub = Get-ChildItem $dir -Directory -EA SilentlyContinue | Where-Object { Test-Path (Join-Path $_.FullName 'Cargo.toml') } | Select-Object -First 1
+        if ($sub) { return $sub.FullName }
+        $any = Get-ChildItem $dir -Recurse -File -Filter 'Cargo.toml' -EA SilentlyContinue | Select-Object -First 1
+        if ($any) { return $any.DirectoryName }
+        return ''
+    } catch { return '' }
+}
+
+function Register-Prebuilt([string]$exePath, [string]$repo) {
+    try {
+        $name = ($repo -replace '[/:.]', '_')
+        $dst = Join-Path $tbDlDir.Text.Trim (Join-Path $name 'target\release')
+        New-Item -ItemType Directory -Force -Path $dst | Out-Null
+        Copy-Item $exePath (Join-Path $dst 'victory.exe') -Force
+        Add-Log ("已登记预编译 exe: {0}" -f (Join-Path $dst 'victory.exe'))
+        Scan-Builds
+        return $true
+    } catch { Add-Log ("登记失败: " + $_.Exception.Message); return $false }
+}
+
+function Build-And-Deploy([string]$cargo) {
+    try {
+        if (-not (Get-Command cargo -EA SilentlyContinue)) { Add-Log '没有 cargo，无法编译'; return $false }
+        try { if ($tbProxy -and $tbProxy.Text.Trim()) { $env:HTTP_PROXY = $tbProxy.Text.Trim(); $env:HTTPS_PROXY = $tbProxy.Text.Trim(); Add-Log ("cargo 代理: " + $tbProxy.Text.Trim()) } } catch { }
+        $bLog = Join-Path $env:TEMP ("gta6-race-build-" + [System.IO.Path]::GetFileName($cargo) + ".log")
+        Remove-Item $bLog -EA SilentlyContinue
+        $attempts = @(
+            @('-profile', 'diag', '-p', 'victory', '--features', 'diagnostics'),
+            @('build', '--release')
+        )
+        $built = @()
+        foreach ($at in $attempts) {
+            $args2 = if ($at[0] -eq '-profile') { @('build') + $at } else { $at }
+            Add-Log ("编译命令: cargo " + ($args2 -join ' '))
             $psi = New-Object System.Diagnostics.ProcessStartInfo
             $psi.FileName = 'cargo'
-            $psi.Arguments = 'build --profile diag -p victory --features diagnostics'
-            $psi.WorkingDirectory = $root
+            $psi.Arguments = ($args2 -join ' ')
+            $psi.WorkingDirectory = $cargo
             $psi.UseShellExecute = $false
             $psi.RedirectStandardOutput = $true
             $psi.RedirectStandardError = $true
@@ -1124,15 +1169,162 @@ function Pull-RaceBuild($p) {
             $bp = [System.Diagnostics.Process]::Start($psi)
             $out = $bp.StandardOutput.ReadToEnd() + "`r`n" + $bp.StandardError.ReadToEnd()
             $bp.WaitForExit()
-            Set-Content -Path $bLog -Value $out -Encoding UTF8
-            $tail = ($out -split "`r?`n" | Where-Object { $_ } | Select-Object -Last 5) -join ' | '
-            Add-Log ("编译结束: " + $tail)
-            Start-Sleep -Milliseconds 500
-            Scan-Builds
+            Add-Content -Path $bLog -Value $out -Encoding UTF8
+            $built = @(Get-ChildItem $cargo -Recurse -Depth 6 -File -Filter 'victory*.exe' -EA SilentlyContinue | Where-Object { $_.FullName -match '\\target\\(diag|release)\\' } | Sort-Object LastWriteTime -Descending)
+            if ($built.Count -gt 0) { break }
+            $tail = ($out -split "`r?`n" | Where-Object { $_ } | Select-Object -Last 6) -join ' | '
+            Add-Log ("编译失败/无产物，尾部: " + $tail)
         }
-    } catch { Add-Log ("拉取构建失败: " + $_.Exception.Message) }
+        if ($built.Count -eq 0) {
+            Add-Log ("编译结束但没找到 victory.exe（日志: {0}）" -f $bLog)
+            return $false
+        }
+        $exe = $built[0]
+        Add-Log ("编译成功: {0} ({1:N1} MB)" -f $exe.FullName, ($exe.Length/1MB))
+        # 复制到规范路径，确保扫描器能找到并可直接使用
+        $repoName = Split-Path $cargo -Leaf
+        $dst = Join-Path $tbDlDir.Text.Trim (Join-Path $repoName 'target\release')
+        New-Item -ItemType Directory -Force -Path $dst | Out-Null
+        Copy-Item $exe.FullName (Join-Path $dst 'victory.exe') -Force
+        Add-Log ("已部署: {0}" -f (Join-Path $dst 'victory.exe'))
+        Scan-Builds
+        return $true
+    } catch { Add-Log ("编译失败: " + $_.Exception.Message); return $false }
 }
 
+function Pull-RaceBuildAuto($p) {
+    $lines = @()
+    $lines += ("repo=" + $p.repo)
+    $assets = @(Get-ReleaseAssets $p.repo)
+    $lines += ("releaseAssets=" + $assets.Count)
+    $prefer = $null
+    if ($assets.Count -gt 0) {
+        $prefer = $assets | Where-Object { $_.Name -match '(?i)(win|windows|x64|win64)' -and $_.Name -match '(?i)\.(zip|7z|tar\.gz|tgz|exe)$' } | Select-Object -First 1
+        if (-not $prefer) { $prefer = $assets | Where-Object { $_.Name -match '(?i)\.(zip|7z|tar\.gz|tgz|exe)$' } | Select-Object -First 1 }
+        if ($prefer) { $lines += ("pickedAsset=" + $prefer.Name + " " + [math]::Round($prefer.Size/1MB,1) + "MB") }
+    }
+    $dest = $tbDlDir.Text.Trim()
+    New-Item -ItemType Directory -Force -Path $dest | Out-Null
+    if ($prefer) {
+        $file = Join-Path $dest $prefer.Name
+        try { Invoke-WebRequest -Uri $prefer.Url -OutFile $file -UseBasicParsing -TimeoutSec 600 } catch { $lines += ("downloadError=" + $_.Exception.Message); return $lines }
+        $lines += ("downloaded=" + $prefer.Name + " " + (Get-Item $file).Length + "B")
+        $extract = Join-Path $dest ([System.IO.Path]::GetFileNameWithoutExtension($prefer.Name))
+        $okEx = Expand-Any $file $extract
+        $lines += ("extracted=" + $okEx + " -> " + $extract)
+        if ($okEx) {
+            $found = @(Find-PrebuiltExe $extract)
+            $lines += ("prebuiltFound=" + $found.Count)
+            if ($found.Count -gt 0) { [void](Register-Prebuilt $found[0].FullName $p.repo); $lines += "registered=yes" ; return $lines }
+            $cargo = Find-CargoRoot $extract
+            $lines += ("cargoRoot=" + $cargo)
+            if ($cargo -and $env:GTA6_LAUNCHER_PULLTEST_COMPILE -eq '1') {
+                if (Get-Command cargo -EA SilentlyContinue) {
+                    $lines += "compiling=yes"
+                    $okB = Build-And-Deploy $cargo
+                    $lines += ("compileOk=" + $okB)
+                } else { $lines += "cargo=missing" }
+            }
+        }
+        return $lines
+    }
+    # 无 release → 源码
+    $branch = 'main'
+    try { $info = Invoke-RestMethod -Uri "https://api.github.com/repos/$($p.repo)" -Headers @{ 'User-Agent'='gta6-launcher' } -TimeoutSec 20; if ($info.default_branch) { $branch = $info.default_branch } } catch { }
+    $lines += ("noReleaseUsingSource=yes branch=" + $branch)
+    Download-FromGitHub $p.repo $branch $dest
+    $zipName = ($p.repo -replace '/', '_') + "-$branch.zip"
+    $extract = Join-Path $dest ([System.IO.Path]::GetFileNameWithoutExtension($zipName))
+    $lines += ("zipExists=" + (Test-Path (Join-Path $dest $zipName)) + " path=" + (Join-Path $dest $zipName))
+    $lines += ("extractedDir=" + $extract + " exists=" + (Test-Path $extract))
+    if (-not (Test-Path $extract)) { return $lines }
+    $cargo = Find-CargoRoot $extract
+    $lines += ("cargoRoot=" + $cargo)
+    $found = @(Find-PrebuiltExe $extract)
+    $lines += ("prebuiltFound=" + $found.Count)
+    if ($found.Count -gt 0) { [void](Register-Prebuilt $found[0].FullName $p.repo); $lines += "registered=yes"; return $lines }
+    if ($cargo -and $env:GTA6_LAUNCHER_PULLTEST_COMPILE -eq '1') {
+        $lines += "compiling=yes"
+        $okB = Build-And-Deploy $cargo
+        $lines += ("compileOk=" + $okB)
+    }
+    return $lines
+}
+
+function Pull-RaceBuild($p) {
+    try {
+        if (-not $p) { Add-Log '先在排行榜列表里选一个项目'; return }
+        if (-not $p.repo) { [System.Windows.Forms.MessageBox]::Show('该项目没有公开仓库（可能已删除/私有），无法拉取。', '无法拉取'); return }
+
+        # 1) 硬件适配检查
+        $compat = Get-RaceCompat $p
+        if (-not $compat.Ok) {
+            $hw = $script:hw
+            $msg = ("选中项目：{0}（榜上第 {1} 名）`r`n测试硬件：{2}`r`n`r`n可能的适配问题：`r`n  - {3}`r`n`r`n你的配置：{4} / {5} GB 显存 / {6} GB 内存`r`n`r`n仍然继续拉取吗？`r`n  是 = 继续`r`n  否 = 取消" -f $p.name, $p.pos, ((@($p.tested.gpu) -join ', ')), ($compat.Reasons -join "`r`n  - "), $hw.Vendor, [math]::Round($hw.VramMB/1024,0), $hw.RamGB)
+            if ([System.Windows.Forms.MessageBox]::Show($msg, '配置可能不适配', 'YesNo', 'Warning') -ne 'Yes') { Add-Log ("已取消拉取 {0}（配置不适配）" -f $p.name); return }
+        }
+
+        # 2) 查 Release
+        Add-Log ("检查 {0} 的 Release…" -f $p.repo)
+        $assets = Get-ReleaseAssets $p.repo
+        $prefer = $null
+        if ($assets.Count -gt 0) {
+            $prefer = $assets | Where-Object { $_.Name -match '(?i)(win|windows|x64|win64)' -and $_.Name -match '(?i)\.(zip|7z|tar\.gz|tgz|exe)$' } | Select-Object -First 1
+            if (-not $prefer) { $prefer = $assets | Where-Object { $_.Name -match '(?i)\.(zip|7z|tar\.gz|tgz|exe)$' } | Select-Object -First 1 }
+        }
+
+        $dest = $tbDlDir.Text.Trim()
+        if ($prefer) {
+            $sz = [math]::Round($prefer.Size / 1MB, 1)
+            $msg = ("该项目有 Release 附件：`r`n  {0}（{1} MB）`r`n`r`n拉取方式：`r`n  是 = 下载 Release 附件（推荐）`r`n  否 = 下载源码 ZIP 并编译`r`n  取消 = 不拉取" -f $prefer.Name, $sz)
+            $choice = [System.Windows.Forms.MessageBox]::Show($msg, '拉取构建', 'YesNoCancel', 'Question')
+            if ($choice -eq 'Cancel') { return }
+            if ($choice -eq 'Yes') {
+                Add-Log ("下载 Release: {0} ({1} MB)" -f $prefer.Name, $sz)
+                $file = Join-Path $dest $prefer.Name
+                Invoke-WebRequest -Uri $prefer.Url -OutFile $file -UseBasicParsing -TimeoutSec 600
+                $extract = Join-Path $dest ([System.IO.Path]::GetFileNameWithoutExtension($prefer.Name))
+                $okEx = Expand-Any $file $extract
+                if (-not $okEx) { Add-Log '未知压缩格式（需要 7z/tar）；文件已下载到: ' + $file; return }
+                $found = Find-PrebuiltExe $extract
+                if ($found -and $found.Count -gt 0) {
+                    [void](Register-Prebuilt $found[0].FullName $p.repo)
+                    Add-Log 'Release 附件已解压并登记为构建（去 ② 选择）'
+                } else {
+                    $cargo = Find-CargoRoot $extract
+                    if ($cargo) { Add-Log ("Release 附件里没有 victory.exe；发现了源码工程: {0}，可点「编译选中的源码构建」" -f $cargo) }
+                    else { Add-Log 'Release 附件已解压，但没有找到 victory.exe 或 Cargo.toml'; }
+                }
+                return
+            }
+            # choice == No → 走源码
+        } else {
+            $msg = ("{0} 没有可用的 Release 附件。`r`n`r`n是否改为下载源码 ZIP？（下载后可选择编译）`r`n  是 = 下载源码 ZIP`r`n  否 = 取消" -f $p.name)
+            if ([System.Windows.Forms.MessageBox]::Show($msg, '没有 Release', 'YesNo', 'Question') -ne 'Yes') { Add-Log '已取消（没有 Release）'; return }
+        }
+
+        # 3) 源码 ZIP
+        $branch = 'main'
+        try {
+            $info = Invoke-RestMethod -Uri "https://api.github.com/repos/$($p.repo)" -Headers @{ 'User-Agent' = 'gta6-launcher' } -TimeoutSec 20
+            if ($info.default_branch) { $branch = $info.default_branch }
+        } catch { }
+        Add-Log ("下载源码: {0} @ {1}" -f $p.repo, $branch)
+        Download-FromGitHub $p.repo $branch $dest
+        $zipName = ($p.repo -replace '/', '_') + "-$branch.zip"
+        $extract = Join-Path $dest ([System.IO.Path]::GetFileNameWithoutExtension($zipName))
+        $cargo = Find-CargoRoot $extract
+        if (-not $cargo) { Add-Log '解压后没找到 Cargo.toml（可能是非 Rust 项目）'; return }
+        $foundExe = Find-PrebuiltExe $cargo
+        if ($foundExe -and $foundExe.Count -gt 0) {
+            [void](Register-Prebuilt $foundExe[0].FullName $p.repo)
+            return
+        }
+        if (-not (Get-Command cargo -EA SilentlyContinue)) { Add-Log ("源码已下载到 {0}，但本机没有 cargo，无法编译" -f $cargo); return }
+        if ([System.Windows.Forms.MessageBox]::Show(("源码已下载：`r`n{0}`r`n`r`n现在编译吗？（可能需要几分钟）" -f $cargo), '编译源码', 'YesNo', 'Question') -ne 'Yes') { Add-Log '已跳过编译'; return }
+        [void](Build-And-Deploy $cargo)
+    } catch { Add-Log ("拉取构建失败: " + $_.Exception.Message) }
+}
 # ---------------------------------------------------------------- 键盘映射
 function KeyNameToVk([string]$name) {
     if (-not $name) { return -1 }
@@ -1301,6 +1493,19 @@ $form.Add_Shown({
     $raceTimer.Interval = 1500
     $raceTimer.Add_Tick({ $this.Stop(); try { Update-Race } catch { } })
     $raceTimer.Start()
+    if ($env:GTA6_LAUNCHER_PULLTEST_REPO) {
+        try {
+            $repo = $env:GTA6_LAUNCHER_PULLTEST_REPO.Trim()
+            $pout = $env:GTA6_LAUNCHER_PULLTEST_OUT
+            if (-not $pout) { $pout = (Join-Path $Root 'pulltest.result.txt') }
+            $fake = [pscustomobject]@{ name = ($repo -split '/')[-1]; repo = $repo; pos = 99; stage = 6; status = ''; kind = ''; tested = [pscustomobject]@{ os = @('Windows'); gpu = @('NVIDIA') }; lanes = [pscustomobject]@{ picture = [pscustomobject]@{ step = 3 }; speed = [pscustomobject]@{ high = 10 }; stability = [pscustomobject]@{ minutes = 30 } } }
+            $lines = @(Pull-RaceBuildAuto $fake)
+            $lines += ("buildsNow=" + @($script:builds).Count)
+            $lines += ("buildNames=" + ((@($script:builds) | ForEach-Object { $_.Name } | Select-Object -Unique) -join ','))
+            Set-Content -Path $pout -Value ($lines -join "`r`n") -Encoding UTF8
+        } catch { Set-Content -Path $pout -Value ("ERR " + $_.Exception.Message) -Encoding UTF8 }
+        $form.Close()
+    }
     if ($env:GTA6_LAUNCHER_COMPATTEST) {
         try {
             Update-Race
@@ -1448,5 +1653,5 @@ if ($env:GTA6_LAUNCHER_CHECKUPDATE) {
 
 $lblAuthor = New-Label '作者: DKTTT (github.com/DKTTT)  ·  基于 VIctory 社区项目 (avatarmanz / trustno1-coder / fxceless / codec-d)  ·  v1.0' 16 776 1012 20 8.5 $Muted
 $form.Controls.Add($lblAuthor)
-Add-Log 'GTA VI 自动启动器 v1.4 by DKTTT'
+Add-Log 'GTA VI 自动启动器 v1.5 by DKTTT'
 [void]$form.ShowDialog()
