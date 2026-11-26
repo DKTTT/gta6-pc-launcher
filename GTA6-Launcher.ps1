@@ -950,23 +950,24 @@ function LaneStep($lane) {
 }
 
 function SpeedStep($lane) {
-    if ($null -eq $lane) { return 0.0 }
-    try { if ($lane.PSObject.Properties['step']) { return [double]$lane.step } } catch { }
-    $v = 0.0
-    try { $v = [double]$lane.high } catch { try { $v = [double]$lane.low } catch { } }
-    if ($v -le 0) { return 0.0 }
+    if ($null -eq $lane) { return -1.0 }
+    try { if ($lane.PSObject.Properties['step'] -and $null -ne $lane.step) { return [double]$lane.step } } catch { }
+    $v = -1.0
+    # 保守：优先用最低 fps（最差场景）
+    try { if ($lane.PSObject.Properties['low'] -and $null -ne $lane.low) { $v = [double]$lane.low } } catch { }
+    if ($v -lt 0) { try { if ($lane.PSObject.Properties['high'] -and $null -ne $lane.high) { $v = [double]$lane.high } } catch { } }
+    if ($v -le 0) { return -1.0 }
     if ($v -lt 2) { return 1.0 } elseif ($v -lt 5) { return 2.0 } elseif ($v -lt 10) { return 3.0 }
     elseif ($v -lt 20) { return 4.0 } elseif ($v -lt 30) { return 5.0 } else { return 6.0 }
 }
 function StabilityStep($lane) {
-    if ($null -eq $lane) { return 0.0 }
-    try { if ($lane.PSObject.Properties['step']) { return [double]$lane.step } } catch { }
-    $m = 0.0
-    try { $m = [double]$lane.minutes } catch { }
-    if ($m -le 0) { return 0.0 }
+    if ($null -eq $lane) { return -1.0 }
+    try { if ($lane.PSObject.Properties['step'] -and $null -ne $lane.step) { return [double]$lane.step } } catch { }
+    $m = -1.0
+    try { if ($lane.PSObject.Properties['minutes'] -and $null -ne $lane.minutes) { $m = [double]$lane.minutes } } catch { }
+    if ($m -le 0) { return -1.0 }
     if ($m -lt 10) { return 1.0 } elseif ($m -lt 30) { return 2.0 } elseif ($m -lt 60) { return 3.0 } else { return 4.0 }
 }
-
 $script:badBuilds = @{ 'cool_fox' = '白屏（已知问题，不建议）' }
 function Get-RepoCandidates([string]$proj) {
     $ordered = @()
@@ -992,36 +993,117 @@ function Get-RepoCandidates([string]$proj) {
 function Get-RaceRecommendation($data) {
     $hw = $script:hw
     if (-not $hw) { return @() }
+    $userGB = 0
+    try { $userGB = [math]::Round($hw.VramMB / 1024, 0) } catch { }
+    # 预先构建 本地仓库 -> 构建名 映射（每个工程只跑一次 git，避免打分时数千次进程调用）
+    $localMap = @{}
+    foreach ($b in @($script:builds)) {
+        try {
+            foreach ($c in @(Get-RepoCandidates $b.Project)) {
+                if ($c) { $k = $c.ToLower(); if (-not $localMap.ContainsKey($k)) { $localMap[$k] = $b.Name } }
+            }
+        } catch { }
+    }
     $scored = @()
     foreach ($p in @($data.projects | Where-Object { $_.repo -and $_.stage -ge 6 })) {
-        $gpuText = (@($p.tested.gpu) -join ' ')
-        $vendorMatch = 0.0
-        if ($hw.Vendor -eq 'NVIDIA' -and $gpuText -match 'NVIDIA|RTX|GTX') { $vendorMatch = 1.0 }
-        elseif ($hw.Vendor -eq 'AMD' -and $gpuText -match 'AMD|Radeon') { $vendorMatch = 1.0 }
-        elseif ($gpuText -match 'NVIDIA|AMD') { $vendorMatch = 0.3 }
+        $gpuList = @($p.tested.gpu)
+        $gpuText = ($gpuList -join ' ')
+        $text = ("$($p.status) $($p.kind) $($p.basis) $gpuText")
+
+        $vendorScore = 0.5
+        $vendorNote = '厂商未注明'
+        if ($gpuList.Count -gt 0) {
+            $hasUser = $false; $hasOther = $false
+            foreach ($g in $gpuList) {
+                $gs = "$g"
+                if ($hw.Vendor -eq 'NVIDIA' -and $gs -match 'NVIDIA|RTX|GTX') { $hasUser = $true }
+                elseif ($hw.Vendor -eq 'AMD' -and $gs -match 'AMD|Radeon') { $hasUser = $true }
+                elseif ($gs -match 'NVIDIA|AMD|RTX|GTX|Radeon') { $hasOther = $true }
+            }
+            if ($hasUser) { $vendorScore = 1.0; $vendorNote = '厂商匹配' }
+            elseif ($hasOther) { $vendorScore = 0.0; $vendorNote = '只在另一家显卡上测试' }
+        }
+
+        $vramNums = @()
+        foreach ($pat in 'with\s+(\d+)\s*GB', '(\d+)\s*GB\s*(?:card|VRAM|version|model|variant)', 'RTX\s*\d{4}\s*(?:Ti|SUPER)?\s*[^\d]{0,6}?(\d+)\s*GB', 'RX\s*\d{4}\s*(?:XT|XTX)?\s*[^\d]{0,6}?(\d+)\s*GB') {
+            foreach ($m0 in [regex]::Matches($text, $pat, 'IgnoreCase')) { $vramNums += [int]$m0.Groups[1].Value }
+        }
+        $vramNums = @($vramNums | Where-Object { $_ -ge 4 -and $_ -le 32 } | Sort-Object -Unique)
         $vramClose = 0.5
-        $text = "$($p.status) $($p.kind) $gpuText"
-        $cardNums = @()
-        foreach ($pat in 'RTX\s*\d{4}\s*(?:Ti|SUPER)?[^\d]{0,20}?(\d+)\s*GB', 'RX\s*\d{4}\s*(?:XT|XTX)?[^\d]{0,20}?(\d+)\s*GB', '(\d+)\s*GB\s*(?:card|VRAM)') {
-            foreach ($m0 in [regex]::Matches($text, $pat, 'IgnoreCase')) { $cardNums += [int]$m0.Groups[1].Value }
-        }
-        if ($cardNums.Count -eq 0) {
-            $all = @([regex]::Matches($gpuText, '(\d+)\s*GB') | ForEach-Object { [int]$_.Groups[1].Value } | Where-Object { $_ -le 48 })
-            $cardNums = $all
-        }
-        if ($cardNums.Count -gt 0 -and $hw.VramMB -gt 0) {
-            $userGB = $hw.VramMB / 1024
-            $minDiff = ($cardNums | ForEach-Object { [math]::Abs($_ - $userGB) } | Measure-Object -Minimum).Minimum
+        $vramNote = '显存未注明'
+        if ($vramNums.Count -gt 0 -and $userGB -gt 0) {
+            $minDiff = ($vramNums | ForEach-Object { [math]::Abs($_ - $userGB) } | Measure-Object -Minimum).Minimum
             $vramClose = [math]::Max(0.0, 1.0 - $minDiff / 8.0)
+            $vramNote = ("测试显存 {0}GB" -f ($vramNums -join '/'))
         }
-        $posBonus = 0.5 * [math]::Max(0.0, (50.0 - [double]$p.pos) / 48.0)
-        $speed = (SpeedStep $p.lanes.speed) / 6.0
-        $stab = (StabilityStep $p.lanes.stability) / 4.0
-        $pict = (LaneStep $p.lanes.picture) / 5.0
-        $score = 3.0 * $vendorMatch + 2.0 * $vramClose + 1.5 * $speed + 1.0 * $stab + 1.0 * $pict + $posBonus
-        $scored += [pscustomobject]@{ Project = $p; Score = [math]::Round($score, 2); VendorMatch = $vendorMatch; VramClose = $vramClose }
+
+        $lowVramBonus = 0.0
+        if ($userGB -gt 0 -and $userGB -le 10 -and $text -match '(?i)\b8\s*GB\b') { $lowVramBonus = 0.3 }
+
+        $sp = SpeedStep $p.lanes.speed
+        $st = StabilityStep $p.lanes.stability
+        $pc = LaneStep $p.lanes.picture
+        $spScore = 0.5; if ($sp -ge 0) { $spScore = $sp / 6.0 }
+        $stScore = 0.5; if ($st -ge 0) { $stScore = $st / 4.0 }
+        $pcScore = 0.5; if ($pc -ge 0) { $pcScore = $pc / 5.0 }
+
+        $rankBonus = 0.2 * [math]::Max(0.0, (50.0 - [double]$p.pos) / 48.0)
+        $localBuild = ''
+        if ($p.repo -and $localMap.ContainsKey($p.repo.ToLower())) { $localBuild = $localMap[$p.repo.ToLower()] }
+        $localBonus = 0.0
+        if ($localBuild) { $localBonus = 0.4 }
+
+        $score = 4.0 * $vendorScore + 2.0 * $vramClose + 1.5 * $spScore + 1.0 * $stScore + 1.0 * $pcScore + $rankBonus + $lowVramBonus + $localBonus
+
+        $reasons = @()
+        if ($vendorScore -eq 1.0) { $reasons += '厂商匹配' } elseif ($vendorScore -eq 0.0) { $reasons += '只在另一家测试' }
+        if ($vramClose -ge 0.75) { $reasons += '显存接近' } elseif ($vramClose -le 0.2 -and $vramNums.Count -gt 0) { $reasons += '测试显存偏大' }
+        if ($sp -ge 5) { $reasons += '速度快' } elseif ($sp -lt 0) { $reasons += '速度未测' }
+        if ($st -lt 0) { $reasons += '稳定性未测' }
+        if ($lowVramBonus -gt 0) { $reasons += '8GB实测' }
+        if ($localBuild) { $reasons += ('本地已有:' + $localBuild) }
+
+        $scored += [pscustomobject]@{
+            Project = $p; Score = [math]::Round($score, 2)
+            VendorMatch = $vendorScore; VramClose = $vramClose
+            VramNote = $vramNote; Reasons = $reasons
+        }
     }
     return @($scored | Sort-Object Score -Descending)
+}
+if ($env:GTA6_LAUNCHER_ALGO_TEST) {
+    try {
+        $dataPath = $env:GTA6_LAUNCHER_ALGO_DATA
+        if (-not $dataPath -or -not (Test-Path $dataPath)) {
+            foreach ($cand in @((Join-Path $Root 'race-cache.json'), 'E:\gta6\work\race-data.json')) {
+                if (Test-Path $cand) { $dataPath = $cand; break }
+            }
+        }
+        $data = Get-Content $dataPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $script:builds = @()
+        if (-not (Get-Command Find-LocalBuildForRepo -EA SilentlyContinue)) { function Find-LocalBuildForRepo([string]$repo) { return '' } }
+        $out = @()
+        foreach ($cfg in @(
+            @{ Name = 'NVIDIA 8GB'; Vendor = 'NVIDIA'; VramMB = 8192 },
+            @{ Name = 'NVIDIA 16GB'; Vendor = 'NVIDIA'; VramMB = 16384 },
+            @{ Name = 'AMD 16GB'; Vendor = 'AMD'; VramMB = 16384 }
+        )) {
+            $script:hw = [pscustomobject]@{ Vendor = $cfg.Vendor; VramMB = $cfg.VramMB; GpuName = 'test'; RamGB = 32 }
+            $r = @(Get-RaceRecommendation $data)
+            $out += ("=== {0} ===" -f $cfg.Name)
+            $n = 0
+            foreach ($s in $r) {
+                $n++
+                if ($n -gt 8) { break }
+                $out += ("{0,2}. {1,-22} score={2,-5} vendor={3} vram={4} reasons={5}" -f $n, $s.Project.name, $s.Score, $s.VendorMatch, $s.VramClose, (@($s.Reasons) -join ','))
+            }
+            # 检查 AMD-only 项目是否被正确压低
+            $amdOnly = @($r | Where-Object { $_.VendorMatch -eq 0.0 } | Select-Object -First 3)
+            $out += ("AMD-only 项目最低分检查: " + (($amdOnly | ForEach-Object { $_.Project.name + '(' + $_.Score + ')' }) -join ', '))
+        }
+        Set-Content -Path $env:GTA6_LAUNCHER_ALGO_TEST -Value ($out -join "`r`n") -Encoding UTF8
+    } catch { Set-Content -Path $env:GTA6_LAUNCHER_ALGO_TEST -Value ("ERR " + $_.Exception.Message) -Encoding UTF8 }
+    exit
 }
 
 function Find-LocalBuildForRepo([string]$repo) {
@@ -1068,19 +1150,16 @@ function Update-Race {
         $lstRace.Items.Clear()
         $script:raceList = @()
 $script:recProjects = @()
-$script:logDir = Join-Path $Root 'logs'
-$script:gameLog = $null
-$script:gameStart = $null
-$script:crashFile = Join-Path $script:logDir 'crashes.jsonl'
-$script:crashCount = 0
         foreach ($p in @($data.projects | Sort-Object pos | Select-Object -First 25)) {
             $repoTxt = if ($p.repo) { $p.repo } else { '(无公开代码)' }
             $lstRace.Items.Add(("{0,2}. {1,-22} st{2}  画面{3}/5 速度{4}/6 稳定{5}/4   {6}" -f $p.pos, $p.name, $p.stage, (LaneStep $p.lanes.picture), (SpeedStep $p.lanes.speed), (StabilityStep $p.lanes.stability), $repoTxt)) | Out-Null
             $script:raceList += $p
         }
         $lblRaceUpdated.Text = ("数据时间: {0}（每启动更新；双击行拉取构建）" -f $data.checked)
+        if ($env:GTA6_LAUNCHER_TRACE) { Add-Content -Path $env:GTA6_LAUNCHER_TRACE -Value ((Get-Date).ToString('HH:mm:ss') + ' list filled') -Encoding UTF8 }
 
-        $scored = Get-RaceRecommendation $data
+        try { $scored = Get-RaceRecommendation $data } catch { if ($env:GTA6_LAUNCHER_TRACE) { Add-Content -Path $env:GTA6_LAUNCHER_TRACE -Value ("REC ERROR: " + $_.Exception.Message) -Encoding UTF8 }; Add-Log ("推荐计算失败: " + $_.Exception.Message); $scored = @() }
+        if ($env:GTA6_LAUNCHER_TRACE) { Add-Content -Path $env:GTA6_LAUNCHER_TRACE -Value ((Get-Date).ToString('HH:mm:ss') + ' scored=' + @($scored).Count) -Encoding UTF8 }
         if ($scored.Count -gt 0) {
             $lstRec.Items.Clear()
             $script:recProjects = @()
@@ -1149,11 +1228,13 @@ $script:crashCount = 0
             $bestTxt = ''
             if ($bestLocal) { $bestTxt = "  ★ 本地最佳: " + $bestLocal }
             $lblLocalBuilds.Text = ("本地构建在榜：{0}{1}" -f $sumTxt, $bestTxt)
+            if ($env:GTA6_LAUNCHER_TRACE) { Add-Content -Path $env:GTA6_LAUNCHER_TRACE -Value ((Get-Date).ToString('HH:mm:ss') + ' recRows=' + $lstRec.Items.Count) -Encoding UTF8 }
             Add-Log ("推荐: " + ($lines -join ' / '))
             $script:raceRec = $scored
             Add-Log ("排行榜推荐已生成（{0} 行）：{1}" -f $lines.Count, ((@($scored | Select-Object -First 3) | ForEach-Object { $_.Project.name }) -join ' > '))
         }
     } catch {
+        if ($env:GTA6_LAUNCHER_TRACE) { Add-Content -Path $env:GTA6_LAUNCHER_TRACE -Value ((Get-Date).ToString('HH:mm:ss') + ' UPDATE ERROR: ' + $_.Exception.Message) -Encoding UTF8 }
         Add-Log ("排行榜处理失败: " + $_.Exception.Message)
         $lblRaceUpdated.Text = '排行榜处理失败'
     }
@@ -1507,11 +1588,6 @@ function Stop-Mapper {
         $script:mapperWanted = $false
 $script:raceList = @()
 $script:recProjects = @()
-$script:logDir = Join-Path $Root 'logs'
-$script:gameLog = $null
-$script:gameStart = $null
-$script:crashFile = Join-Path $script:logDir 'crashes.jsonl'
-$script:crashCount = 0
         $lblKeyStatus.Text = '映射已停止'
         Add-Log '键盘映射已停止'
     } catch { }
@@ -1893,5 +1969,5 @@ if ($env:GTA6_LAUNCHER_CHECKUPDATE) {
 
 $lblAuthor = New-Label '作者: DKTTT (github.com/DKTTT)  ·  基于 VIctory 社区项目 (avatarmanz / trustno1-coder / fxceless / codec-d)  ·  v1.0' 16 776 1012 20 8.5 $Muted
 $form.Controls.Add($lblAuthor)
-Add-Log 'GTA VI 自动启动器 v1.7.3 by DKTTT'
+Add-Log 'GTA VI 自动启动器 v1.8.0 by DKTTT'
 [void]$form.ShowDialog()
