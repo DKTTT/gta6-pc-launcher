@@ -1,4 +1,4 @@
-﻿# GTA VI PC 移植 - 自动检测启动器 v1.10.6
+﻿# GTA VI PC 移植 - 自动检测启动器 v1.10.7
 # 功能：检测硬件 -> 推荐构建与画质；自定义路径；从 GitHub 下载构建；预热；启动
 # 运行：双击同目录 GTA6-Launcher.bat
 
@@ -1281,6 +1281,7 @@ function Find-VictoryBuilds([string]$root) {
     foreach ($profile in 'diag', 'release') {
         Get-ChildItem $root -Recurse -Depth 6 -Filter 'victory.exe' -EA SilentlyContinue |
             Where-Object { $_.FullName -match "\\target\\$profile\\victory\.exe$" } |
+            Where-Object { $_.FullName -notmatch '\\(vi-br-port|VI-BR-PORT|vi_br_port)\\' } |
             ForEach-Object {
                 $proj = $_.FullName -replace "\\target\\$profile\\victory\.exe$", ''
                 $found += [pscustomobject]@{
@@ -1299,6 +1300,14 @@ function Find-VictoryBuilds([string]$root) {
                 Profile = 'exe'; SizeMB = [math]::Round($_.Length / 1MB, 1); Time = $_.LastWriteTime
             }
         }
+    $excluded = @()
+    try {
+        $excluded = @(Get-ChildItem $root -Recurse -Depth 4 -Filter 'victory.exe' -EA SilentlyContinue |
+            Where-Object { $_.FullName -match '\\(vi-br-port|VI-BR-PORT)\\' })
+    } catch { }
+    if ($excluded.Count -gt 0) {
+        Add-Log ("已忽略 {0} 个不兼容构建（vi-br-port）：它的 release 版会忽略光追跳过，配合本启动器会黑屏卡死" -f $excluded.Count)
+    }
     return @($found | Sort-Object Exe -Unique | Sort-Object @{Expression={ if($_.Profile -in @('diag','release')){0}else{1} }}, Project, Profile)
 }
 
@@ -2311,6 +2320,52 @@ function Update-UiResolution($envInfo) {
     } catch { return ('界面分辨率设置失败: ' + $_.Exception.Message) }
 }
 
+# 启动前体检：TDR、存档 4K UI、残留进程/备份文件、游戏文件完整性
+function Run-HealthCheck($envInfo) {
+    try {
+        # TDR 延迟
+        try {
+            $tdr = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers' -Name TdrDelay -EA SilentlyContinue).TdrDelay
+            if ($null -eq $tdr) { Add-Log '体检: TdrDelay 未设置（建议点「修复崩溃/设备移除」按钮设为 60）' }
+            elseif ([int]$tdr -lt 60) { Add-Log ("体检: TdrDelay={0} 偏小，崩溃风险高（建议设为 60）" -f $tdr) }
+        } catch { }
+
+        # 存档 settings.xml 的 UI 分辨率（4K 会明显拖慢）
+        try {
+            $data = $script:dataDir
+            if ($data -and (Test-Path $data)) {
+                $sf = Get-ChildItem $data -Recurse -File -Filter 'settings.xml' -EA SilentlyContinue |
+                      Where-Object { $_.FullName -match 'storage[\\/]settings' } | Select-Object -First 1
+                if ($sf) {
+                    $x = Get-Content $sf.FullName -Raw
+                    $mm = [regex]::Match($x, '(?s)<uiResolution>.*?</uiResolution>')
+                    if ($mm.Success -and $mm.Value -match '3840') { Add-Log '体检: 存档 UI 分辨率是 4K，启动时会自动改为 1080p（减少合成开销）' }
+                }
+            }
+        } catch { }
+
+        # 残留 victory 进程
+        try {
+            $vp = @(Get-Process victory -EA SilentlyContinue)
+            if ($vp.Count -gt 0) { Add-Log ("体检: 发现 {0} 个残留 victory 进程（启动脚本会先清掉）" -f $vp.Count) }
+        } catch { }
+
+        # 游戏目录里的测试备份文件
+        try {
+            $gd = $env:VICTORY_GAME_DIR
+            if ($gd -and (Test-Path $gd)) {
+                $baks = @(Get-ChildItem $gd -File -EA SilentlyContinue | Where-Object { $_.Name -match '\.(original|orig-launcher|bak)$' })
+                foreach ($bk in $baks) { Add-Log ("体检: 游戏目录有备份文件 {0}（{1} MB），确认游戏正常后可删" -f $bk.Name, [math]::Round($bk.Length / 1MB, 1)) }
+                $dr = Join-Path $gd 'data.rpf'
+                if (Test-Path $dr) {
+                    $sz = [math]::Round((Get-Item $dr).Length / 1MB, 0)
+                    if ($sz -lt 100) { Add-Log ("体检: data.rpf 只有 {0} MB，可能不完整（正常约 459 MB）" -f $sz) }
+                } else { Add-Log '体检: 游戏目录没有 data.rpf，启动会失败' }
+            }
+        } catch { }
+    } catch { }
+}
+
 function Launch-Game {
     try {
         if (-not $script:exe) { Add-Log '请先选择构建'; return }
@@ -2330,6 +2385,7 @@ function Launch-Game {
         Add-Log ("缓存: {0}" -f $script:cacheDir)
         $uiNote = Update-UiResolution $envInfo
         if ($uiNote) { Add-Log $uiNote }
+        Run-HealthCheck $envInfo
         New-Item -ItemType Directory -Force -Path $script:logDir | Out-Null
         $script:gameLog = Join-Path $script:logDir ("game-" + (Get-Date -Format 'yyyyMMdd-HHmmss') + ".log")
         $script:gameStart = Get-Date

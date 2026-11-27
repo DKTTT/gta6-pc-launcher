@@ -662,3 +662,17 @@ releaseAssets=0 → 自动转源码 ZIP
 - 找到设置初始化函数：每个设置 = `mov ecx, <哈希>` + 默认浮点常量 + 全局变量 + `call 0x14501aca0`（GetSetting）
 - 已提取 416 个设置项；`imposter.trees.qualityThresholds` 名字字符串的引用点 0x14578196d 就在该注册链里
 - 但注册哈希不是 joaat/FNV1a/djb2/sdbm（名字表里匹配不到），还需确定哈希算法或设置表位置才能定位"树木阈值"全局变量
+
+## [v1.10.7] - 2026-11-27
+
+### 修复
+- **构建扫描排除不兼容 fork**：自动忽略 `vi-br-port`（VI-BR-PORT）的构建。它的 release 版会忽略 `VICTORY_SKIP_PIPELINES`，配合本启动器的参数会黑屏卡死（实测 5 秒/帧）；扫描时会提示忽略数量
+- **启动前体检**（新增 `Run-HealthCheck`）：
+  - TdrDelay 未设置或小于 60 时提示（设备移除崩溃风险）
+  - 存档 `settings.xml` 的 UI 分辨率是 4K 时提示（启动时自动改 1080p）
+  - 发现残留 victory 进程时提示
+  - 游戏目录里残留 `*.original` / `*.bak` 测试备份时列出（带大小，可删）
+  - `data.rpf` 缺失或明显偏小时警告（正常约 459 MB）
+
+### 说明
+- 界面分辨率跟随输出（v1.10.6）保持不变
