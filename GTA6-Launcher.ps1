@@ -1,4 +1,4 @@
-﻿# GTA VI PC 移植 - 自动检测启动器 v1.10.3
+﻿# GTA VI PC 移植 - 自动检测启动器 v1.10.4
 # 功能：检测硬件 -> 推荐构建与画质；自定义路径；从 GitHub 下载构建；预热；启动
 # 运行：双击同目录 GTA6-Launcher.bat
 
@@ -901,6 +901,13 @@ $chkOpenDir.Location = New-Object System.Drawing.Point(14, 214)
 $chkOpenDir.Size = New-Object System.Drawing.Size(300, 24)
 $chkOpenDir.ForeColor = $TextCol; $chkOpenDir.BackColor = $Bg; $chkOpenDir.Checked = $true
 $tabRun.Controls.Add($chkOpenDir)
+# 自动进游戏：过加载画面/「按任意键」时自动按回车+A（仅当游戏窗口在前台，绝不瞎按）
+$chkAutoEnter = New-Object System.Windows.Forms.CheckBox
+$chkAutoEnter.Text = '自动进游戏（回车/A，仅游戏窗口在前台时）'
+$chkAutoEnter.Location = New-Object System.Drawing.Point(760, 214)
+$chkAutoEnter.Size = New-Object System.Drawing.Size(264, 24)
+$chkAutoEnter.ForeColor = $TextCol; $chkAutoEnter.BackColor = $Bg; $chkAutoEnter.Checked = $true
+$tabRun.Controls.Add($chkAutoEnter)
 # 关光追：跳过 RT 绘制（按 shader 哈希匹配，A 卡 / N 卡通用；引擎侧只在 diag 构建生效）
 $chkRtOff = New-Object System.Windows.Forms.CheckBox
 $chkRtOff.Text = '关闭光追（跳过 RT 绘制，A/N 卡通用）'
@@ -2291,6 +2298,12 @@ function Launch-Game {
             -RedirectStandardOutput $script:gameLog -RedirectStandardError ($script:gameLog + '.err')
         Add-Log ("游戏日志: {0}" -f $script:gameLog)
         Add-Log ("游戏已启动 PID={0}" -f $script:game.Id)
+        if ($chkAutoEnter -and $chkAutoEnter.Checked) {
+            try {
+                Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $PSScriptRoot 'auto-enter.ps1')) -WindowStyle Hidden | Out-Null
+                Add-Log '已启动自动进游戏（回车/A，仅前台窗口时按键）'
+            } catch { Add-Log ('自动进游戏启动失败: ' + $_.Exception.Message) }
+        }
         if ($chkKeyAuto.Checked) {
             Start-Sleep -Milliseconds 800
             Start-Mapper
