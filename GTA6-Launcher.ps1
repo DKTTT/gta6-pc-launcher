@@ -1,4 +1,4 @@
-﻿# GTA VI PC 移植 - 自动检测启动器 v1.10.8
+﻿# GTA VI PC 移植 - 自动检测启动器 v1.10.9
 # 功能：检测硬件 -> 推荐构建与画质；自定义路径；从 GitHub 下载构建；预热；启动
 # 运行：双击同目录 GTA6-Launcher.bat
 
@@ -2391,7 +2391,15 @@ function Launch-Game {
         New-Item -ItemType Directory -Force -Path $script:logDir | Out-Null
         $script:gameLog = Join-Path $script:logDir ("game-" + (Get-Date -Format 'yyyyMMdd-HHmmss') + ".log")
         $script:gameStart = Get-Date
-        $script:game = Start-Process -FilePath $script:exe -ArgumentList @('run', (Quote-Arg $gameExe), '--execute', '--console', $envInfo.Console) `
+        # 新基线（foxhound / vf-cn）：必须用 play 启动，F1 菜单才能保存设置
+        $foxhound = ($script:buildName -match '^vf-cn')
+        if ($foxhound) {
+            $startArgs = @('play', (Quote-Arg $gameExe), '--series-s', '--fps', '1000')
+            Add-Log '新基线构建：用 play 启动（F1 菜单设置可保存）'
+        } else {
+            $startArgs = @('run', (Quote-Arg $gameExe), '--execute', '--console', $envInfo.Console)
+        }
+                $script:game = Start-Process -FilePath $script:exe -ArgumentList $startArgs `
             -WorkingDirectory (Split-Path $script:exe) -PassThru `
             -RedirectStandardOutput $script:gameLog -RedirectStandardError ($script:gameLog + '.err')
         Add-Log ("游戏日志: {0}" -f $script:gameLog)
@@ -4555,5 +4563,5 @@ if ($env:GTA6_LAUNCHER_CHECKUPDATE) {
 
 $lblAuthor = New-Label '作者: DKTTT (github.com/DKTTT)  ·  基于 VIctory 社区项目 (avatarmanz / trustno1-coder / fxceless / codec-d)  ·  v1.0' 16 776 1012 20 8.5 $Muted
 $form.Controls.Add($lblAuthor)
-Add-Log 'GTA VI 自动启动器 v1.10.6 by DKTTT'
+Add-Log 'GTA VI 自动启动器 v1.10.9 by DKTTT'
 [void]$form.ShowDialog()
