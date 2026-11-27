@@ -37,6 +37,50 @@ GTA VI PC 移植 · 自动启动器 ｜ 作者：DKTTT
 
 ---
 
+## [v1.10.10] - 2026-11-27
+
+### 修复：CN / 汉化构建的启动要求（必须用 `play`）
+
+CN 包里的 `启动.bat` 是用 `victory.exe play "<游戏exe>"` 启动的 —— 只有 `play` 会写/读 `settings.xml`，用 `run ... --execute` 启动时标题会报 **「没有设置文件：请用「启动.bat」启动（菜单设置才存得下）」**。
+
+| 以前 | 现在 |
+|---|---|
+| 只有构建名以 `vf-cn` 开头才用 `play`，改名/下载来的 CN 包一律走 `run`，于是报没有设置文件 | 按 **exe 能力**判断：`victory.exe --help` 里有 `play` 子命令就用 `play`（`Test-ExeSub`），保留 `vf-cn` 名字作为兜底 |
+| `play` 参数写死 `--series-s --fps 1000` | 按界面自动映射：主机模式 → `--series-s` / `--series-x`；分辨率 → `--res 1080to1440`（≤1080）/ `1440`（≥1200）/ `4k`（≥2000）；`--fps 1000` 不变 |
+| 插帧等高级开关只能改 bat | ③ 页新增 **play 附加参数** 输入框（存 `launcher-config.json` 的 `PlayArgs`），可直接填 `--framegen 2 --set "VICTORY_FRAMEGEN=1"`；原样拼在命令行末尾，引号不会被拆 |
+| 名字像 CN 但 exe 没有 `play` 时无声无息 | 日志提示「F1 菜单设置可能存不下来；请用包里的「启动.bat」或换带 play 的新基线构建」，状态栏显示 `启动方式: play（设置可存）` / `run（无 play 子命令）` |
+
+已用 CN 包自带的 `victory.exe` 实测 clap 校验通过：
+`play --series-s --res 1080to1440 --fps 1000`、`--series-x --res 1440`、`--series-s --res 4k`、`--framegen 2 --set VICTORY_FRAMEGEN=1` 全部被接受；`--res bogus` / `--framegen 9` 会被明确拒绝（说明参数确实传到位了）。
+
+---
+
+## [v1.10.9] - 2026-11-27
+
+- 新基线（foxhound / vf-cn）改用 `play` 启动，F1 菜单设置才能保存；补充中文菜单说明
+
+---
+
+## [v1.10.8] - 2026-11-27
+
+- 便携根目录改到 `%LOCALAPPDATA%`：重命名启动器目录不再导致存档目录跟着变
+- 构建列表里 `vf-cn` 显示为「vf-cn（汉化F1菜单）」
+
+---
+
+## [v1.10.7] - 2026-11-27
+
+- 排除不兼容的 `vi-br-port` 构建（避免误选）
+- 启动前加健康检查（内存/磁盘/驱动等明显问题先提示）
+
+---
+
+## [v1.10.6] - 2026-11-27
+
+- 下载源可选：`GitHub` 或 `GTA HUB 镜像`（`git.gtahub.st`，Forgejo；`Owner/Repo` 自动换算成 `github/Owner--Repo`）
+- 界面分辨率自动跟随输出分辨率；补充引擎 settings 逆向笔记
+
+---
 ## [v1.10.1] - 2026-11-27
 
 ### 新增：游戏退出/崩溃后自动“翻译”日志

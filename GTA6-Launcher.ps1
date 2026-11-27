@@ -1,4 +1,4 @@
-﻿# GTA VI PC 移植 - 自动检测启动器 v1.10.9
+﻿# GTA VI PC 移植 - 自动检测启动器 v1.10.10
 # 功能：检测硬件 -> 推荐构建与画质；自定义路径；从 GitHub 下载构建；预热；启动
 # 运行：双击同目录 GTA6-Launcher.bat
 
@@ -66,6 +66,7 @@ $DefaultCfg = @{
     KeyMapOn  = $false
     RtOff     = $true
     Source    = 'GitHub'
+    PlayArgs  = ''
 }
 $Cfg = $DefaultCfg.Clone()
 if (Test-Path $ConfigPath) {
@@ -92,6 +93,7 @@ function Save-Cfg {
         $Cfg.KeyMapOn = if ($chkKeyAuto) { [bool]$chkKeyAuto.Checked } else { $false }
         $Cfg.RtOff = if ($chkRtOff) { [bool]$chkRtOff.Checked } else { $true }
         $Cfg.Source = if ($cbSource -and $cbSource.SelectedItem) { [string]$cbSource.SelectedItem } else { 'GitHub' }
+        $Cfg.PlayArgs = if ($tbPlayArgs) { $tbPlayArgs.Text.Trim() } else { '' }
         $Cfg | ConvertTo-Json -Depth 3 | Set-Content -Path $ConfigPath -Encoding UTF8
     } catch { }
 }
@@ -936,6 +938,12 @@ $tabRun.Controls.Add($btnOpenLogs)
 $btnTdr = New-Btn '设置 TDR 超时（设备移除）' 14 288 300 32
 $lblTdr = New-Label 'TDR: 读取中…' 330 294 620 22 9 $Muted
 $tabRun.Controls.Add($btnTdr); $tabRun.Controls.Add($lblTdr)
+# CN / 新基线构建走 `victory.exe play`（F1 菜单设置才存得下），这里放附加参数
+$tabRun.Controls.Add((New-Label 'play 附加参数（仅 CN/新基线构建生效；例：--framegen 2 --set "VICTORY_FRAMEGEN=1"）' 14 326 960 22 9 $Muted))
+$tbPlayArgs = New-Tb $Cfg.PlayArgs 14 350 760
+$tabRun.Controls.Add($tbPlayArgs)
+$lblPlayMode = New-Label '启动方式: 自动' 784 356 190 22 9 $Muted
+$tabRun.Controls.Add($lblPlayMode)
 function Get-TdrInfo {
     try {
         $k = 'HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers'
@@ -2391,13 +2399,29 @@ function Launch-Game {
         New-Item -ItemType Directory -Force -Path $script:logDir | Out-Null
         $script:gameLog = Join-Path $script:logDir ("game-" + (Get-Date -Format 'yyyyMMdd-HHmmss') + ".log")
         $script:gameStart = Get-Date
-        # 新基线（foxhound / vf-cn）：必须用 play 启动，F1 菜单才能保存设置
-        $foxhound = ($script:buildName -match '^vf-cn')
-        if ($foxhound) {
-            $startArgs = @('play', (Quote-Arg $gameExe), '--series-s', '--fps', '1000')
-            Add-Log '新基线构建：用 play 启动（F1 菜单设置可保存）'
+        # 用 play 启动：F1 菜单的设置只有 play 会存（否则标题报“没有设置文件”）。
+        # 判断按 exe 能力走，这样改名/下载来的 CN 包也能识别；名字像 CN 但没 play 时提示。
+        $canPlay = $false
+        try { $canPlay = Test-ExeSub $script:exe 'play' } catch { }
+        $nameLooksCn = ($script:buildName -match '(?i)^vf-cn|[-_]cn[-_]|汉化|中文')
+        $usePlay = $canPlay -or ($script:buildName -match '^vf-cn')
+        if ($usePlay) {
+            $startArgs = @('play', (Quote-Arg $gameExe))
+            if ($envInfo.Console -eq 'series-x') { $startArgs += '--series-x' } else { $startArgs += '--series-s' }
+            $h = 0; try { $h = [int]$envInfo.Height } catch { }
+            $playRes = if ($h -ge 2000) { '4k' } elseif ($h -ge 1200) { '1440' } else { '1080to1440' }
+            $startArgs += @('--res', $playRes)
+            $startArgs += @('--fps', '1000')
+            $playExtra = ''
+            try { if ($tbPlayArgs) { $playExtra = [string]$tbPlayArgs.Text.Trim() } } catch { }
+            if ($playExtra) { $startArgs = @(($startArgs -join ' ') + ' ' + $playExtra) }
+            Add-Log ("用 play 启动（F1 菜单设置可保存）：--res {0} / {1}{2}" -f $playRes, $envInfo.Console, $(if ($canPlay) { '（按 exe 的 play 子命令识别）' } else { '（按构建名识别）' }))
+            if ($playExtra) { Add-Log ("  play 附加参数: " + $playExtra) }
+            if ($lblPlayMode) { $lblPlayMode.Text = '启动方式: play（设置可存）'; $lblPlayMode.ForeColor = $Green }
         } else {
             $startArgs = @('run', (Quote-Arg $gameExe), '--execute', '--console', $envInfo.Console)
+            if ($lblPlayMode) { $lblPlayMode.Text = '启动方式: run（无 play 子命令）'; $lblPlayMode.ForeColor = $Muted }
+            if ($nameLooksCn) { Add-Log '提示：这个构建像是 CN/汉化版，但它的 exe 没有 play 子命令 —— F1 菜单设置可能存不下来；请用包里的「启动.bat」，或换带 play 的新基线构建' }
         }
                 $script:game = Start-Process -FilePath $script:exe -ArgumentList $startArgs `
             -WorkingDirectory (Split-Path $script:exe) -PassThru `
@@ -3701,6 +3725,7 @@ $form.Add_Shown({
         if ($Cfg.ContainsKey('KeyMapOn')) { $chkKeyAuto.Checked = [bool]$Cfg.KeyMapOn }
         if ($Cfg.ContainsKey('RtOff')) { $chkRtOff.Checked = [bool]$Cfg.RtOff }
         if ($Cfg.ContainsKey('Source') -and $cbSource) { $cbSource.SelectedItem = [string]$Cfg.Source }
+        if ($Cfg.ContainsKey('PlayArgs') -and $tbPlayArgs) { $tbPlayArgs.Text = [string]$Cfg.PlayArgs }
     } catch { }
     $raceTimer = New-Object System.Windows.Forms.Timer
     $raceTimer.Interval = 1500
@@ -4563,5 +4588,5 @@ if ($env:GTA6_LAUNCHER_CHECKUPDATE) {
 
 $lblAuthor = New-Label '作者: DKTTT (github.com/DKTTT)  ·  基于 VIctory 社区项目 (avatarmanz / trustno1-coder / fxceless / codec-d)  ·  v1.0' 16 776 1012 20 8.5 $Muted
 $form.Controls.Add($lblAuthor)
-Add-Log 'GTA VI 自动启动器 v1.10.9 by DKTTT'
+Add-Log 'GTA VI 自动启动器 v1.10.10 by DKTTT'
 [void]$form.ShowDialog()
