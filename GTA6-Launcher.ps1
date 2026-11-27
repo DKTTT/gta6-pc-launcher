@@ -1,4 +1,4 @@
-﻿# GTA VI PC 移植 - 自动检测启动器 v1.10.12
+﻿# GTA VI PC 移植 - 自动检测启动器 v1.10.13
 # 功能：检测硬件 -> 推荐构建与画质；自定义路径；从 GitHub 下载构建；预热；启动
 # 运行：双击同目录 GTA6-Launcher.bat
 
@@ -938,11 +938,15 @@ $tabRun.Controls.Add($btnOpenLogs)
 $btnTdr = New-Btn '设置 TDR 超时（设备移除）' 14 288 300 32
 $lblTdr = New-Label 'TDR: 读取中…' 330 294 620 22 9 $Muted
 $tabRun.Controls.Add($btnTdr); $tabRun.Controls.Add($lblTdr)
+# 虚拟内存（页面文件）：内存耗尽（Rust 分配失败）时用；改完要重启
+$btnPageFile = New-Btn '设置虚拟内存（内存耗尽）' 14 326 300 32
+$lblPageFile = New-Label '虚拟内存: 读取中…' 330 332 620 22 9 $Muted
+$tabRun.Controls.Add($btnPageFile); $tabRun.Controls.Add($lblPageFile)
 # CN / 新基线构建走 `victory.exe play`（F1 菜单设置才存得下），这里放附加参数
-$tabRun.Controls.Add((New-Label 'play 附加参数（仅 CN/新基线构建生效；例：--framegen 2 --set "VICTORY_FRAMEGEN=1"）' 14 326 960 22 9 $Muted))
-$tbPlayArgs = New-Tb $Cfg.PlayArgs 14 350 760
+$tabRun.Controls.Add((New-Label 'play 附加参数（仅 CN/新基线构建生效；例：--framegen 2 --set "VICTORY_FRAMEGEN=1"）' 14 366 960 22 9 $Muted))
+$tbPlayArgs = New-Tb $Cfg.PlayArgs 14 390 760
 $tabRun.Controls.Add($tbPlayArgs)
-$lblPlayMode = New-Label '启动方式: 自动' 784 356 190 22 9 $Muted
+$lblPlayMode = New-Label '启动方式: 自动' 784 396 190 22 9 $Muted
 $tabRun.Controls.Add($lblPlayMode)
 function Get-TdrInfo {
     try {
@@ -980,8 +984,143 @@ $btnTdr.Add_Click({
         if ($_.Exception.Message -match 'cancel|取消') { Add-Log 'TDR 设置已取消（没有拿到管理员权限）' } else { Add-Log ("TDR 设置失败: " + $_.Exception.Message) }
     } finally { try { $form.Enabled = $true } catch { } }
 })
-Update-TdrLabel
-
+# ---------------- 虚拟内存（页面文件）设置 ----------------
+function Get-PageFileInfo {
+    try {
+        $auto = $false
+        try { $auto = [bool](Get-CimInstance Win32_ComputerSystem -EA SilentlyContinue).AutomaticManagedPagefile } catch { }
+        $settings = @(); try { $settings = @(Get-CimInstance Win32_PageFileSetting -EA SilentlyContinue) } catch { }
+        $usage = @(); try { $usage = @(Get-CimInstance Win32_PageFileUsage -EA SilentlyContinue) } catch { }
+        return [pscustomobject]@{ Auto = $auto; Settings = $settings; Usage = $usage }
+    } catch { return [pscustomobject]@{ Auto = $false; Settings = @(); Usage = @() } }
+}
+function Update-PageFileLabel {
+    try {
+        $i = Get-PageFileInfo
+        $usedMb = 0
+        if (@($i.Usage).Count -gt 0) { $usedMb = (@($i.Usage) | ForEach-Object { [int]$_.AllocatedBaseSize } | Measure-Object -Sum).Sum }
+        if ($i.Auto) {
+            $lblPageFile.Text = ("虚拟内存: 系统管理{0}" -f $(if ($usedMb -gt 0) { "（已分配 {0:N0} MB）" -f $usedMb } else { '' }))
+            $lblPageFile.ForeColor = $Muted
+        } elseif (@($i.Settings).Count -gt 0) {
+            $s = @($i.Settings)[0]
+            $lblPageFile.Text = ("虚拟内存: 固定 {0}–{1} MB @ {2}" -f $s.InitialSize, $s.MaximumSize, $s.Name)
+            $lblPageFile.ForeColor = $(if ([int]$s.MaximumSize -ge 16384) { $Green } else { $Muted })
+        } else {
+            $lblPageFile.Text = '虚拟内存: 没有设置（全靠系统临时扩，容易内存耗尽）'
+            $lblPageFile.ForeColor = $Muted
+        }
+    } catch { }
+}
+# 找剩余空间最大的固定盘，建议放页面文件
+function Get-PageFileDrive {
+    try {
+        $best = $null
+        foreach ($d in @(Get-PSDrive -PSProvider FileSystem -EA SilentlyContinue)) {
+            if (-not $d.Free) { continue }
+            if (-not $best -or $d.Free -gt $best.Free) { $best = $d }
+        }
+        if ($best -and $best.Root) { return ([string]$best.Root).TrimEnd('\') }
+    } catch { }
+    return 'C:'
+}
+function Start-ElevatedPageFile([string]$mode, [string]$drive, [int]$initMb, [int]$maxMb) {
+    $resultFile = Join-Path $env:TEMP ('gta6-pagefile-' + [guid]::NewGuid().ToString('N').Substring(0, 8) + '.txt')
+    if ($mode -eq 'system') {
+        $body = @"
+`$ErrorActionPreference = 'Stop'
+try {
+    `$cs = Get-CimInstance Win32_ComputerSystem
+    Set-CimInstance -InputObject `$cs -Property @{ AutomaticManagedPagefile = `$true } -EA Stop
+    'OK system'
+} catch { 'FAIL ' + `$_.Exception.Message }
+"@
+    } else {
+        $body = @"
+`$ErrorActionPreference = 'Stop'
+try {
+    `$cs = Get-CimInstance Win32_ComputerSystem
+    if (`$cs.AutomaticManagedPagefile) { Set-CimInstance -InputObject `$cs -Property @{ AutomaticManagedPagefile = `$false } -EA Stop }
+    Get-CimInstance Win32_PageFileSetting -EA SilentlyContinue | Remove-CimInstance -EA Stop
+    New-CimInstance -ClassName Win32_PageFileSetting -Property @{
+        Name = '$drive\pagefile.sys'; InitialSize = $initMb; MaximumSize = $maxMb
+    } -EA Stop | Out-Null
+    'OK fixed'
+} catch { 'FAIL ' + `$_.Exception.Message }
+"@
+    }
+    $full = $body + "`r`n" + "'DONE' | Out-File -FilePath '$resultFile' -Encoding UTF8 -Append"
+    $enc = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($full))
+    $proc = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $enc) -Verb RunAs -PassThru -Wait -WindowStyle Hidden
+    $msg = ''
+    try { if (Test-Path $resultFile) { $msg = ((Get-Content $resultFile -Encoding UTF8 -EA SilentlyContinue) -join ' ') ; Remove-Item $resultFile -Force -EA SilentlyContinue } } catch { }
+    return [pscustomobject]@{ ExitCode = $proc.ExitCode; Message = $msg.Trim() }
+}
+$btnPageFile.Add_Click({
+    try {
+        $form.Enabled = $false
+        $i = Get-PageFileInfo
+        $cur = if ($i.Auto) { '系统管理' } elseif (@($i.Settings).Count -gt 0) { ("固定 {0}–{1} MB @ {2}" -f @($i.Settings)[0].InitialSize, @($i.Settings)[0].MaximumSize, @($i.Settings)[0].Name) } else { '没有设置' }
+        $drv = Get-PageFileDrive
+        $dlg = New-Object System.Windows.Forms.Form
+        $dlg.Text = '虚拟内存（页面文件）'
+        $dlg.Size = New-Object System.Drawing.Size(600, 400)
+        $dlg.StartPosition = 'CenterParent'
+        $dlg.FormBorderStyle = 'FixedDialog'; $dlg.MaximizeBox = $false; $dlg.MinimizeBox = $false
+        $dlg.BackColor = $Bg; $dlg.ForeColor = $TextCol
+        $mk = { param($txt, $x, $y, $w, $h, $sz) $l = New-Object System.Windows.Forms.Label; $l.Text = $txt; $l.Location = New-Object System.Drawing.Point($x, $y); $l.Size = New-Object System.Drawing.Size($w, $h); $l.ForeColor = $TextCol; $l.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', $sz); return $l }
+        $dlg.Controls.Add((& $mk "当前：$cur" 16 12 560 22 9))
+        $dlg.Controls.Add((& $mk '游戏报「memory allocation … failed」（内存耗尽）时，把虚拟内存调大通常能解决。' 16 40 560 22 9))
+        $dlg.Controls.Add((& $mk '改完必须重启电脑才生效；页面文件所在的盘要有足够空间。' 16 64 560 22 9))
+        $rbAuto = New-Object System.Windows.Forms.RadioButton
+        $rbAuto.Text = '系统管理（推荐，Windows 自动扩）'; $rbAuto.Location = New-Object System.Drawing.Point(18, 100); $rbAuto.Size = New-Object System.Drawing.Size(540, 24); $rbAuto.Checked = $true
+        $rbAuto.ForeColor = $TextCol
+        $dlg.Controls.Add($rbAuto)
+        $rbFix = New-Object System.Windows.Forms.RadioButton
+        $rbFix.Text = '固定大小'; $rbFix.Location = New-Object System.Drawing.Point(18, 136); $rbFix.Size = New-Object System.Drawing.Size(90, 24)
+        $rbFix.ForeColor = $TextCol
+        $dlg.Controls.Add($rbFix)
+        $tbInit = New-Object System.Windows.Forms.TextBox
+        $tbInit.Text = '16384'; $tbInit.Location = New-Object System.Drawing.Point(112, 134); $tbInit.Size = New-Object System.Drawing.Size(90, 24)
+        $dlg.Controls.Add($tbInit)
+        $dlg.Controls.Add((& $mk 'MB 起 ～' 206 138 70 22 9))
+        $tbMax = New-Object System.Windows.Forms.TextBox
+        $tbMax.Text = '32768'; $tbMax.Location = New-Object System.Drawing.Point(268, 134); $tbMax.Size = New-Object System.Drawing.Size(90, 24)
+        $dlg.Controls.Add($tbMax)
+        $dlg.Controls.Add((& $mk "MB 止，放在 $drv 盘" 362 138 200 22 9))
+        $dlg.Controls.Add((& $mk '提示：8 GB 内存建议 16384–32768；16 GB 建议 32768–65536；SSD 上多一点不影响寿命。' 18 176 550 40 8.5))
+        $btnOk = New-Object System.Windows.Forms.Button
+        $btnOk.Text = '应用（需管理员）'; $btnOk.Location = New-Object System.Drawing.Point(300, 300); $btnOk.Size = New-Object System.Drawing.Size(150, 34); $btnOk.DialogResult = 'OK'
+        $btnCancel = New-Object System.Windows.Forms.Button
+        $btnCancel.Text = '取消'; $btnCancel.Location = New-Object System.Drawing.Point(460, 300); $btnCancel.Size = New-Object System.Drawing.Size(100, 34); $btnCancel.DialogResult = 'Cancel'
+        $dlg.Controls.Add($btnOk); $dlg.Controls.Add($btnCancel)
+        $dlg.AcceptButton = $btnOk; $dlg.CancelButton = $btnCancel
+        if ($dlg.ShowDialog($form) -ne 'OK') { Add-Log '虚拟内存设置已取消'; return }
+        if ($rbFix.Checked) {
+            $init = 0; $max = 0
+            if (-not [int]::TryParse($tbInit.Text.Trim(), [ref]$init) -or -not [int]::TryParse($tbMax.Text.Trim(), [ref]$max) -or $init -lt 512 -or $max -lt $init -or $max -gt 1048576) {
+                Add-Log '虚拟内存: 数值不合法（起 ≥512，止 ≥起，且 ≤1048576 MB）'; return
+            }
+            Add-Log ("虚拟内存: 正在设为固定 {0}–{1} MB @ {2}（需要管理员权限）" -f $init, $max, $drv)
+            $r = Start-ElevatedPageFile 'fixed' $drv $init $max
+        } else {
+            Add-Log '虚拟内存: 正在设为系统管理（需要管理员权限）'
+            $r = Start-ElevatedPageFile 'system' '' 0 0
+        }
+        if ($r.Message -match '^OK') {
+            Add-Log '✅ 虚拟内存已修改，重启电脑后生效'
+            [System.Windows.Forms.MessageBox]::Show('已应用，重启电脑后生效。', '虚拟内存') | Out-Null
+        } elseif ($r.Message -match '^FAIL (.+)$') {
+            Add-Log ('❌ 虚拟内存设置失败: ' + $matches[1])
+        } else {
+            Add-Log ('虚拟内存: 提权进程退出码 {0}，没有拿到结果（可能取消了 UAC）' -f $r.ExitCode)
+        }
+        Update-PageFileLabel
+    } catch {
+        if ($_.Exception.Message -match 'cancel|取消') { Add-Log '虚拟内存设置已取消（没有拿到管理员权限）' } else { Add-Log ('虚拟内存设置失败: ' + $_.Exception.Message) }
+    } finally { try { $dlg.Dispose() } catch { }; try { $form.Enabled = $true } catch { } }
+})
+Update-PageFileLabel
 # ---------------- Tab4: 排行榜 ----------------
 $tabRace.Controls.Add((New-Label 'GTA VI PC Race 排行榜（每次启动自动更新）' 14 12 500 22 10))
 $lblRaceUpdated = New-Label '尚未更新' 500 12 470 22 9 $Muted
@@ -2333,10 +2472,19 @@ function Update-UiResolution($envInfo) {
 # 启动前体检：TDR、存档 4K UI、残留进程/备份文件、游戏文件完整性
 function Run-HealthCheck($envInfo) {
     try {
+        # 虚拟内存（页面文件）：太小是「memory allocation … failed」的直接原因
+        try {
+            $pfi = Get-PageFileInfo
+            if (-not $pfi.Auto -and @($pfi.Settings).Count -gt 0 -and [int]@($pfi.Settings)[0].MaximumSize -lt 16384) {
+                Add-Log ("体检: 虚拟内存上限只有 {0} MB（内存耗尽风险，建议点「设置虚拟内存」改成系统管理或 32768）" -f @($pfi.Settings)[0].MaximumSize)
+            } elseif (-not $pfi.Auto -and @($pfi.Settings).Count -eq 0) {
+                Add-Log '体检: 没设虚拟内存（全靠系统临时扩，长时间游玩容易 memory allocation failed）'
+            }
+        } catch { }
         # TDR 延迟
         try {
             $tdr = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers' -Name TdrDelay -EA SilentlyContinue).TdrDelay
-            if ($null -eq $tdr) { Add-Log '体检: TdrDelay 未设置（建议点「修复崩溃/设备移除」按钮设为 60）' }
+            if ($null -eq $tdr) { Add-Log '体检: TdrDelay 未设置（建议点「设置 TDR 超时（设备移除）」按钮设为 60）' }
             elseif ([int]$tdr -lt 60) { Add-Log ("体检: TdrDelay={0} 偏小，崩溃风险高（建议设为 60）" -f $tdr) }
         } catch { }
 
@@ -4624,5 +4772,5 @@ if ($env:GTA6_LAUNCHER_CHECKUPDATE) {
 
 $lblAuthor = New-Label '作者: DKTTT (github.com/DKTTT)  ·  基于 VIctory 社区项目 (avatarmanz / trustno1-coder / fxceless / codec-d)  ·  v1.0' 16 776 1012 20 8.5 $Muted
 $form.Controls.Add($lblAuthor)
-Add-Log 'GTA VI 自动启动器 v1.10.12 by DKTTT'
+Add-Log 'GTA VI 自动启动器 v1.10.13 by DKTTT'
 [void]$form.ShowDialog()
