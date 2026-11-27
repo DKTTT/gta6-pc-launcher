@@ -1,4 +1,4 @@
-﻿# GTA VI PC 移植 - 自动检测启动器 v1.10.7
+﻿# GTA VI PC 移植 - 自动检测启动器 v1.10.8
 # 功能：检测硬件 -> 推荐构建与画质；自定义路径；从 GitHub 下载构建；预热；启动
 # 运行：双击同目录 GTA6-Launcher.bat
 
@@ -156,9 +156,9 @@ function Find-BuildRoot {
     return ''
 }
 
-# 就近可写目录（启动器目录优先，写不进去就用 LocalAppData）
+# 就近可写目录（LocalAppData 优先：启动器文件夹改名/搬家不会丢存档和缓存）
 function Get-PortableRoot {
-    $try = @((Combine-Path $Root 'gta6'), (Combine-Path $env:LOCALAPPDATA 'GTA6Launcher'))
+    $try = @((Combine-Path $env:LOCALAPPDATA 'GTA6Launcher'), (Combine-Path $env:USERPROFILE 'gta6'), (Combine-Path $Root 'gta6'))
     foreach ($p in $try) {
         try {
             New-Item -ItemType Directory -Force -Path $p -EA Stop | Out-Null
@@ -2017,7 +2017,9 @@ function Apply-BuildScan([string]$root, $found) {
         try {
             $t = $f.Time
             if ($t -isnot [datetime]) { try { $t = [datetime]$t } catch { $t = Get-Date } }
-            $lstBuilds.Items.Add(('{0}  [{1}]  {2} MB  {3:MM-dd HH:mm}' -f $f.Name, $f.Profile, $f.SizeMB, $t)) | Out-Null
+            $shown = [string]$f.Name
+            if ($shown -match '^vf-cn') { $shown = 'vf-cn（汉化F1菜单）' }
+            $lstBuilds.Items.Add(('{0}  [{1}]  {2} MB  {3:MM-dd HH:mm}' -f $shown, $f.Profile, $f.SizeMB, $t)) | Out-Null
         } catch { Add-Log ("构建条目格式异常: " + $_.Exception.Message) }
     }
     $script:builds = $found
