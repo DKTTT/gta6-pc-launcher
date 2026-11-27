@@ -37,6 +37,58 @@ GTA VI PC 移植 · 自动启动器 ｜ 作者：DKTTT
 
 ---
 
+## [v1.10.6] - 2026-11-27
+
+### 新增：下载源可选「GTA HUB 镜像」（git.gtahub.st）
+
+「② 构建与下载」加了 **下载源** 下拉框：
+
+| 源 | 用到的地址 |
+|---|---|
+| `GitHub` | `api.github.com` / `codeload.github.com` / `github.com` |
+| `GTA HUB 镜像` | `git.gtahub.st`（Forgejo 17.0.2，把 GitHub 项目镜像成 `github/<Owner>--<Repo>`） |
+
+镜像源下自动换算：`Owner/Repo` → `github/Owner--Repo`，并改用 Forgejo 的接口：
+
+- 源码 ZIP：`https://git.gtahub.st/github/Owner--Repo/archive/<分支>.zip`
+- 最新提交：`/api/v1/repos/github/Owner--Repo/commits?sha=<分支>&limit=1`
+- 默认分支 / `.gitmodules`：`/api/v1/repos/github/Owner--Repo`、`.../contents/.gitmodules`
+- 克隆：`https://git.gtahub.st/github/Owner--Repo.git`
+- 「打开项目仓库」也跟着换源
+
+注意：镜像只收录**上游项目**（`fxceless/victory-fork`、`Marvisak/VIctory`、`avatarmanz/VIctory-7900XTX` 等），你自己的 `DKTTT/*` 仓库没有镜像 —— 选镜像源下载自己的构建会 404，换回 `GitHub` 即可。
+
+## [v1.10.5] - 2026-11-27
+
+### 新增：设置编辑器工具（`settings-editor.ps1`）
+
+把游戏存档里的 ASAV 设置以 JSON 形式查看/编辑，按 joaat 键定位字段。
+
+---
+
+## [v1.10.4] - 2026-11-27
+
+### 新增：自动进游戏
+
+启动游戏后自动在游戏窗口里发 Enter / A（带前台判断，不在前台就不抢），跳过标题/存档确认。
+
+---
+
+## [v1.10.3] - 2026-11-27
+
+### 变更：所有构建共用一份存档
+
+`DATA_DIR` 统一为 `<存档根>\perf-data`，换构建不用再搬存档。
+
+---
+
+## [v1.10.2] - 2026-11-27
+
+### 新增：TDR 超时按钮
+
+一键调高/恢复显卡 TDR 超时（设备被驱动移除 0x887A0007 时的缓解手段），并对 NVIDIA legacy 构建给出提示。
+
+---
 ## [v1.10.1] - 2026-11-27
 
 ### 新增：游戏退出/崩溃后自动“翻译”日志

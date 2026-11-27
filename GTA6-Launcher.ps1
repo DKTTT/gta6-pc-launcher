@@ -1,4 +1,4 @@
-﻿# GTA VI PC 移植 - 自动检测启动器 v1.10.5
+﻿# GTA VI PC 移植 - 自动检测启动器 v1.10.6
 # 功能：检测硬件 -> 推荐构建与画质；自定义路径；从 GitHub 下载构建；预热；启动
 # 运行：双击同目录 GTA6-Launcher.bat
 
@@ -65,6 +65,7 @@ $DefaultCfg = @{
     KeyMap    = ''
     KeyMapOn  = $false
     RtOff     = $true
+    Source    = 'GitHub'
 }
 $Cfg = $DefaultCfg.Clone()
 if (Test-Path $ConfigPath) {
@@ -90,6 +91,7 @@ function Save-Cfg {
         $Cfg.KeyMap = $km
         $Cfg.KeyMapOn = if ($chkKeyAuto) { [bool]$chkKeyAuto.Checked } else { $false }
         $Cfg.RtOff = if ($chkRtOff) { [bool]$chkRtOff.Checked } else { $true }
+        $Cfg.Source = if ($cbSource -and $cbSource.SelectedItem) { [string]$cbSource.SelectedItem } else { 'GitHub' }
         $Cfg | ConvertTo-Json -Depth 3 | Set-Content -Path $ConfigPath -Encoding UTF8
     } catch { }
 }
@@ -840,7 +842,17 @@ $tabBuild.Controls.Add($btnScan)
 $lblBuildInfo = New-Label '' 210 200 740 22 9 $Muted
 $tabBuild.Controls.Add($lblBuildInfo)
 
-$tabBuild.Controls.Add((New-Label '从 GitHub 下载构建' 14 240 300 22 10))
+$tabBuild.Controls.Add((New-Label '从 GitHub / 镜像下载构建' 14 240 300 22 10))
+$tabBuild.Controls.Add((New-Label '下载源' 330 240 60 22 9))
+$cbSource = New-Object System.Windows.Forms.ComboBox
+$cbSource.DropDownStyle = 'DropDownList'
+$cbSource.Location = New-Object System.Drawing.Point(392, 236)
+$cbSource.Size = New-Object System.Drawing.Size(190, 24)
+$cbSource.BackColor = [System.Drawing.Color]::FromArgb(16, 12, 28); $cbSource.ForeColor = $TextCol
+[void]$cbSource.Items.Add('GitHub')
+[void]$cbSource.Items.Add('GTA HUB 镜像')
+$cbSource.SelectedIndex = 0
+$tabBuild.Controls.Add($cbSource)
 $tabBuild.Controls.Add((New-Label '仓库' 14 268 60 22))
 $tbRepo = New-Tb $Cfg.Repo 76 264 300
 $tabBuild.Controls.Add($tbRepo)
@@ -2317,6 +2329,45 @@ function Launch-Game {
     }
 }
 
+# ---------------------------------------------------------------- 下载源（GitHub / GTA HUB 镜像）
+# GTA HUB（git.gtahub.st）跑的是 Forgejo，把 GitHub 项目镜像成 github/<Owner>--<Repo>：
+#   仓库页 https://git.gtahub.st/github/Owner--Repo
+#   归档   https://git.gtahub.st/github/Owner--Repo/archive/<branch>.zip
+#   API    https://git.gtahub.st/api/v1/repos/github/Owner--Repo
+function Get-SourceKind {
+    try { if ($cbSource -and $cbSource.SelectedItem) { return [string]$cbSource.SelectedItem } } catch { }
+    return 'GitHub'
+}
+function Test-MirrorSource { return ((Get-SourceKind) -like '*镜像*') }
+function Get-MirrorRepoName([string]$repo) {
+    if (-not $repo) { return $repo }
+    $r = $repo.Trim().TrimEnd('/')
+    if ($r -match '^github/') { return $r }
+    $parts = $r -split '/'
+    if ($parts.Count -ge 2) { return ('github/' + $parts[0] + '--' + $parts[1]) }
+    return $r
+}
+function Get-SourceRepo([string]$repo) { if (Test-MirrorSource) { return (Get-MirrorRepoName $repo) } return $repo }
+function Get-SourceHost { if (Test-MirrorSource) { return 'https://git.gtahub.st' } return 'https://github.com' }
+function Get-SourceLabel { if (Test-MirrorSource) { return 'GTA HUB 镜像' } return 'GitHub' }
+function Get-RepoApi([string]$repo) {
+    if (Test-MirrorSource) { return ((Get-SourceHost) + '/api/v1/repos/' + (Get-SourceRepo $repo)) }
+    return ('https://api.github.com/repos/' + $repo)
+}
+function Get-RepoCommitUrl([string]$repo, [string]$branch) {
+    if (Test-MirrorSource) { return ((Get-RepoApi $repo) + '/commits?sha=' + [uri]::EscapeDataString($branch) + '&limit=1') }
+    return ((Get-RepoApi $repo) + '/commits/' + $branch)
+}
+function Get-RepoArchiveUrl([string]$repo, [string]$branch) {
+    if (Test-MirrorSource) { return ((Get-SourceHost) + '/' + (Get-SourceRepo $repo) + '/archive/' + [uri]::EscapeDataString($branch) + '.zip') }
+    return ("https://codeload.github.com/$repo/zip/refs/heads/$branch")
+}
+function Get-RepoCloneUrl([string]$repo) {
+    if (Test-MirrorSource) { return ((Get-SourceHost) + '/' + (Get-SourceRepo $repo) + '.git') }
+    return ("https://github.com/$repo.git")
+}
+function Get-RepoWebUrl([string]$repo) { return ((Get-SourceHost) + '/' + (Get-SourceRepo $repo)) }
+
 # ---------------------------------------------------------------- GitHub 下载
 function Download-FromGitHub([string]$repo, [string]$branch, [string]$destDir, [switch]$Release) {
     try {
@@ -2324,7 +2375,7 @@ function Download-FromGitHub([string]$repo, [string]$branch, [string]$destDir, [
         $url = ''
         $file = ''
         if ($Release) {
-            $api = "https://api.github.com/repos/$repo/releases/latest"
+            $api = (Get-RepoApi $repo) + '/releases/latest'
             $rel = Invoke-RestMethod -Uri $api -Headers @{ 'User-Agent' = 'gta6-launcher' } -TimeoutSec 30
             $asset = $rel.assets | Where-Object { $_.name -match '(?i)windows|win64|x64' } | Select-Object -First 1
             if (-not $asset) { $asset = $rel.assets | Select-Object -First 1 }
@@ -2332,9 +2383,9 @@ function Download-FromGitHub([string]$repo, [string]$branch, [string]$destDir, [
             $url = $asset.browser_download_url; $file = Join-Path $destDir $asset.name
             Add-Log ("下载 Release: {0}" -f $asset.name)
         } else {
-            $url = "https://codeload.github.com/$repo/zip/refs/heads/$branch"
+            $url = Get-RepoArchiveUrl $repo $branch
             $file = Join-Path $destDir ("$($repo -replace '/', '_')-$branch.zip")
-            Add-Log ("下载源码: {0} @ {1}" -f $repo, $branch)
+            Add-Log ("下载源码: {0} @ {1}（源：{2}）" -f $repo, $branch, (Get-SourceLabel))
         }
         $lblStatus.Text = '正在下载…'
         Invoke-WebRequest -Uri $url -OutFile $file -TimeoutSec 600 -UseBasicParsing
@@ -2528,16 +2579,19 @@ function Check-Update {
             # 非 git 构建：用 GitHub API（网络请求放作业里，超时也不卡界面）
             $repo = $script:checkCtx.Repo
             $branch = $script:checkCtx.RepoBranch
+            $commitUrl = Get-RepoCommitUrl $repo $branch
+            $isMirror = Test-MirrorSource
             $worker = {
-                param($repo, $branch)
+                param($repo, $branch, $commitUrl, $isMirror)
                 try {
-                    $c = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/commits/$branch" -Headers @{ 'User-Agent' = 'gta6-launcher' } -TimeoutSec 20
+                    $c = Invoke-RestMethod -Uri $commitUrl -Headers @{ 'User-Agent' = 'gta6-launcher' } -TimeoutSec 20
+                    if ($isMirror) { $c = @($c) | Select-Object -First 1 }
                     [pscustomobject]@{ Ok = $true; Sha = [string]$c.sha; Msg = (($c.commit.message -split "`n")[0]) }
                 } catch {
                     [pscustomobject]@{ Ok = $false; Error = $_.Exception.Message }
                 }
             }
-            [void](Start-BgJob '检查上游（GitHub API）' $worker @($repo, $branch) {
+            [void](Start-BgJob ('检查上游（' + (Get-SourceLabel) + '）') $worker @($repo, $branch, $commitUrl, $isMirror) {
                 param($out, $state)
                 $r = @($out) | Select-Object -Last 1
                 if (-not $r) { Add-Log '检查更新没有结果'; return }
@@ -2948,7 +3002,7 @@ function Get-RaceCompat($p) {
 function Get-ReleaseAssets([string]$repo) {
     $out = @()
     try {
-        $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases/latest" -Headers @{ 'User-Agent' = 'gta6-launcher' } -TimeoutSec 20
+        $rel = Invoke-RestMethod -Uri ((Get-RepoApi $repo) + '/releases/latest') -Headers @{ 'User-Agent' = 'gta6-launcher' } -TimeoutSec 20
         foreach ($a in @($rel.assets)) { $out += [pscustomobject]@{ Name = $a.name; Size = [int64]$a.size; Url = $a.browser_download_url } }
     } catch { }
     return $out
@@ -3058,7 +3112,7 @@ function Build-And-Deploy([string]$cargo) {
 
 function Test-HasSubmodules([string]$repo) {
     try {
-        $null = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/contents/.gitmodules" -Headers @{ 'User-Agent' = 'gta6-launcher' } -TimeoutSec 15
+        $null = Invoke-RestMethod -Uri ((Get-RepoApi $repo) + '/contents/.gitmodules') -Headers @{ 'User-Agent' = 'gta6-launcher' } -TimeoutSec 15
         return $true
     } catch { return $false }
 }
@@ -3072,7 +3126,7 @@ function Clone-RepoRecursive([string]$repo, [string]$dest) {
         try { if ($tbProxy) { $proxy = $tbProxy.Text.Trim() } } catch { }
         $gitArgs = @()
         if ($proxy) { $gitArgs += @('-c', ("http.proxy=" + $proxy)) }
-        $gitArgs += @('clone', '--recursive', '--depth', '1', ("https://github.com/$repo.git"), $dir)
+        $gitArgs += @('clone', '--recursive', '--depth', '1', (Get-RepoCloneUrl $repo), $dir)
         $env:GIT_TERMINAL_PROMPT = '0'
         Add-Log ("克隆（含 submodule）: {0}" -f $repo)
         $out = & git @gitArgs 2>&1
@@ -3120,7 +3174,7 @@ function Pull-RaceBuildAuto($p) {
     }
     # 无 release → 源码
     $branch = 'main'
-    try { $info = Invoke-RestMethod -Uri "https://api.github.com/repos/$($p.repo)" -Headers @{ 'User-Agent'='gta6-launcher' } -TimeoutSec 20; if ($info.default_branch) { $branch = $info.default_branch } } catch { }
+    try { $info = Invoke-RestMethod -Uri (Get-RepoApi $p.repo) -Headers @{ 'User-Agent'='gta6-launcher' } -TimeoutSec 20; if ($info.default_branch) { $branch = $info.default_branch } } catch { }
     $lines += ("noReleaseUsingSource=yes branch=" + $branch)
     $hasSub = Test-HasSubmodules $p.repo
     $lines += ("hasSubmodules=" + $hasSub)
@@ -3205,7 +3259,7 @@ function Pull-RaceBuild($p) {
         # 3) 源码 ZIP
         $branch = 'main'
         try {
-            $info = Invoke-RestMethod -Uri "https://api.github.com/repos/$($p.repo)" -Headers @{ 'User-Agent' = 'gta6-launcher' } -TimeoutSec 20
+            $info = Invoke-RestMethod -Uri (Get-RepoApi $p.repo) -Headers @{ 'User-Agent' = 'gta6-launcher' } -TimeoutSec 20
             if ($info.default_branch) { $branch = $info.default_branch }
         } catch { }
         Add-Log ("拉取源码: {0} @ {1}" -f $p.repo, $branch)
@@ -3436,7 +3490,7 @@ $btnRecRepo.Add_Click({
     try {
         if ($lstRec.SelectedIndex -ge 0 -and $script:recProjects -and $script:recProjects.Count -gt $lstRec.SelectedIndex) {
             $rp = $script:recProjects[$lstRec.SelectedIndex]
-            if ($rp.repo) { Start-Process ("https://github.com/" + $rp.repo) } else { Add-Log '该项目没有公开仓库' }
+            if ($rp.repo) { Start-Process (Get-RepoWebUrl $rp.repo) } else { Add-Log '该项目没有公开仓库' }
         } else { Add-Log '先选一个推荐项目' }
     } catch { }
 })
@@ -3552,6 +3606,7 @@ $form.Add_Shown({
         else { $txtKeyMap.Text = "# 每行一条：源键 = 目标键`r`n# CapsLock = Escape`r`n# F1 = Tab" }
         if ($Cfg.ContainsKey('KeyMapOn')) { $chkKeyAuto.Checked = [bool]$Cfg.KeyMapOn }
         if ($Cfg.ContainsKey('RtOff')) { $chkRtOff.Checked = [bool]$Cfg.RtOff }
+        if ($Cfg.ContainsKey('Source') -and $cbSource) { $cbSource.SelectedItem = [string]$Cfg.Source }
     } catch { }
     $raceTimer = New-Object System.Windows.Forms.Timer
     $raceTimer.Interval = 1500
@@ -4414,5 +4469,5 @@ if ($env:GTA6_LAUNCHER_CHECKUPDATE) {
 
 $lblAuthor = New-Label '作者: DKTTT (github.com/DKTTT)  ·  基于 VIctory 社区项目 (avatarmanz / trustno1-coder / fxceless / codec-d)  ·  v1.0' 16 776 1012 20 8.5 $Muted
 $form.Controls.Add($lblAuthor)
-Add-Log 'GTA VI 自动启动器 v1.10.1 by DKTTT'
+Add-Log 'GTA VI 自动启动器 v1.10.6 by DKTTT'
 [void]$form.ShowDialog()
