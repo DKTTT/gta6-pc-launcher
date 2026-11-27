@@ -37,6 +37,29 @@ GTA VI PC 移植 · 自动启动器 ｜ 作者：DKTTT
 
 ---
 
+---
+
+## [v1.10.12] - 2026-11-28
+
+### 新增诊断：宿主内存耗尽（Rust 分配失败）
+
+这份日志跑了 16 分钟才死，死法与显卡无关：
+
+```
+memory allocation of 2736014 bytes failed
+```
+
+`Rust` 申请 2.7 MB 失败 → 进程被直接中止。前面还有两处证据：启动后 45 秒引擎就报 `host memory pressure: limiting texture prefetch and idle upload storage`（可用物理内存不足），标题内存预留峰值 **16.2 GB**、纹理队列占用 **9 GB**，最后几分钟每次 `Frame rate over 100.00ms`（低于 10 FPS）。
+
+诊断新增三条：
+
+| 日志特征 | 结论 |
+|---|---|
+| `memory allocation of N bytes failed` | 宿主内存耗尽（不是显卡）→ 页面文件设系统管理或 ≥32 GB，降材质/分辨率，关浏览器；复现加 `RUST_BACKTRACE=1` |
+| `host memory pressure` | 引擎中途就报过可用内存不足 → 内存一直很紧，长时间游玩会越来越糟 |
+| `Frame rate over 100.00ms` | 末段帧时间 >100 ms，帧生成在硬撑 → 建议 `--no-framegen-ready` 或 `--dlss performance` |
+
+---
 ## [v1.10.11] - 2026-11-27
 
 ### 修复：把「关窗口」误记成崩溃 + 显存超预算的诊断
