@@ -1,4 +1,4 @@
-﻿# GTA VI PC 移植 - 自动检测启动器 v1.10.10
+﻿# GTA VI PC 移植 - 自动检测启动器 v1.10.11
 # 功能：检测硬件 -> 推荐构建与画质；自定义路径；从 GitHub 下载构建；预热；启动
 # 运行：双击同目录 GTA6-Launcher.bat
 
@@ -3525,6 +3525,10 @@ function Auto-Clean-Crashes {
 function Get-LogDiagnosis([string]$text) {
     $out = @()
     if (-not $text) { return $out }
+    # 引擎日志带 ANSI 颜色码（ESC"[3mslot…[0m"），先剥掉再匹配，否则关键字被插断。
+    # 注意 PS 5.1 没有 `e 转义，用 [char]27 拼。
+    $esc = [string][char]27
+    $text = $text -replace ([regex]::Escape($esc) + '\[[0-9;]*m'), ''
     if ($text -match 'the library did not load it') {
         $n = ([regex]::Matches($text, 'the library did not load it')).Count
         $out += ("有 {0} 条管线没能从 PSO 库里读到（LoadPipeline 返回 0x80070057 = 库里没有这条）→ 运行时会现场重编，预热覆盖不到的部分会顿一下" -f $n)
@@ -3541,6 +3545,16 @@ function Get-LogDiagnosis([string]$text) {
     }
     if ($text -match '0x887A0004') {
         $out += '0x887A0004 = 设备接口或功能级别不受支持 → 驱动版本太老或系统不支持该 D3D12 特性'
+    }
+    if ($text -match 'Exceeded VRAM budget|out of VRAM') {
+        $n = ([regex]::Matches($text, 'Exceeded VRAM budget|out of VRAM')).Count
+        $out += ("显存超预算 {0} 次：DLSS/帧生成在挤显存，升采样会被直接丢掉（画面不升、帧数抖）" -f $n)
+        $out += '  → play 参数加 --dlss off 或 --dlss performance，再关帧生成 --no-framegen-ready；8GB 卡别用 --res 1440（默认就是它）'
+    }
+    if ($text -match 'a pipeline creation method that is not implemented') {
+        $n = ([regex]::Matches($text, 'a pipeline creation method that is not implemented')).Count
+        $slots = @([regex]::Matches($text, 'slot\s*=\s*(0x[0-9a-fA-F]+)') | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique) -join ', '
+        $out += ("有 {0} 次「管线创建方式未实现」（slot {1}）：标题会少这些管线，属引擎缺口，不是设置问题" -f $n, $slots)
     }
     if ($text -match 'build\s+unknown \(') {
         $out += '日志里 "build unknown" 只是名字表里没有这条记录，hash 前缀 b99f876b = 1.0.2.1，分辨率补丁依然生效'
@@ -3676,14 +3690,23 @@ $timer.Add_Tick({
             }
             $text = ($tail -join "`n")
             $crash = $false; $reason = ''
+            # 窗口被关掉/标题自己 suspend 结束时，引擎是正常收尾的：先判这一类，避免误记成崩溃
+            $softEnd = ($text -match 'window closed: suspending the title|title suspended; ending the title')
             if ($text -match 'upload_file_minidump|BacktraceBreakpad|panic|device removed|0x887A0006|DXGI_ERROR_DEVICE') { $crash = $true; $reason = 'breakpad/设备移除/panic' }
+            elseif ($softEnd) { $crash = $false; $reason = '' }
             elseif ($null -ne $code -and $code -ne 0) { $crash = $true; $reason = ("退出码 {0}" -f $code) }
             elseif ($ran -gt 0 -and $ran -lt 10) { $crash = $true; $reason = ("启动 {0} 秒即退出" -f [math]::Round($ran, 1)) }
             try {
                 $diag = @(Get-LogDiagnosis ((@($tail) -join "`n") + "`n" + $(try { if ($script:gameLog) { (Get-Content ($script:gameLog + '.err') -Tail 400 -EA SilentlyContinue) -join "`n" } else { '' } } catch { '' })))
                 foreach ($dsc in $diag) { Add-Log ("诊断: " + $dsc) }
             } catch { }
-            if ($crash) { Record-Crash $reason $tail } else { Add-Log ("游戏正常退出（运行 {0:N0} 秒）" -f $ran) }
+            if ($crash) {
+                Record-Crash $reason $tail
+            } elseif ($softEnd) {
+                Add-Log ("游戏窗口已关闭（引擎正常收尾，运行 {0:N0} 秒，不计入崩溃）" -f $ran)
+            } else {
+                Add-Log ("游戏正常退出（运行 {0:N0} 秒）" -f $ran)
+            }
             $script:game = $null; $script:gameStart = $null
             $btnLaunch.Enabled = $true; $lblStatus.Text = '游戏已退出'
         }
@@ -4588,5 +4611,5 @@ if ($env:GTA6_LAUNCHER_CHECKUPDATE) {
 
 $lblAuthor = New-Label '作者: DKTTT (github.com/DKTTT)  ·  基于 VIctory 社区项目 (avatarmanz / trustno1-coder / fxceless / codec-d)  ·  v1.0' 16 776 1012 20 8.5 $Muted
 $form.Controls.Add($lblAuthor)
-Add-Log 'GTA VI 自动启动器 v1.10.10 by DKTTT'
+Add-Log 'GTA VI 自动启动器 v1.10.11 by DKTTT'
 [void]$form.ShowDialog()

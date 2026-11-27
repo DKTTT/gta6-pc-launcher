@@ -37,6 +37,21 @@ GTA VI PC 移植 · 自动启动器 ｜ 作者：DKTTT
 
 ---
 
+## [v1.10.11] - 2026-11-27
+
+### 修复：把「关窗口」误记成崩溃 + 显存超预算的诊断
+
+用户发来 4 次启动日志，全部没有 panic / 设备移除 / 访问违例，都以 `window closed: suspending the title` → `title suspended; ending the title` 收尾（窗口被关掉，引擎正常收尾），但启动器按「运行 <10 秒」把它记成了崩溃。
+
+| 以前 | 现在 |
+|---|---|
+| 只要退出码非 0 或运行 <10 秒就记崩溃 | 先看有没有 `window closed` / `title suspended`：有且没有硬崩特征 → 记「游戏窗口已关闭（引擎正常收尾，运行 N 秒，不计入崩溃）」 |
+| 日志里满屏 `Exceeded VRAM budget` 没人管 | 诊断给出：「显存超预算 N 次 → DLSS/帧生成在挤显存，升采样会被丢掉」，并建议 `--dlss off` / `--dlss performance` / `--no-framegen-ready`、8GB 卡别用 `--res 1440` |
+| `pipeline creation method that is not implemented` 看不出是哪个 slot | 诊断汇总次数与 slot 列表（实测 `0x218, 0x1c8, 0xb8`），并说明属引擎缺口、不是设置问题 |
+| 引擎日志带 ANSI 颜色码，关键字被插断（`slot` 与 `=` 之间夹转义符） | 诊断前先剥掉 ANSI（PS 5.1 没有 `` `e `` 转义，用 `[char]27` 拼） |
+
+---
+
 ## [v1.10.10] - 2026-11-27
 
 ### 修复：CN / 汉化构建的启动要求（必须用 `play`）
