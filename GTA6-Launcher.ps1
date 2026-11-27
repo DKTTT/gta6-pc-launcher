@@ -2285,6 +2285,32 @@ function Test-LaunchCacheGate($cs, [switch]$NoPrompt) {
     return $true
 }
 
+# 界面/HUD 分辨率跟随输出分辨率（settings.xml 的 uiResolution）
+function Update-UiResolution($envInfo) {
+    try {
+        $outH = 1080
+        try { if ($envInfo -and $envInfo.Console -eq 'series-x') { $outH = 2160 } } catch { }
+        $outW = if ($outH -eq 2160) { 3840 } else { 1920 }
+        $data = $script:dataDir
+        if (-not $data -or -not (Test-Path $data)) { return $null }
+        $f = Get-ChildItem $data -Recurse -File -Filter 'settings.xml' -EA SilentlyContinue |
+             Where-Object { $_.FullName -match 'storage[\\/]settings' } | Select-Object -First 1
+        if (-not $f) { return '界面分辨率: 没找到 settings.xml（跳过）' }
+        $bak = $f.FullName + '.launcher-backup'
+        if (-not (Test-Path $bak)) { Copy-Item $f.FullName $bak -Force }
+        $xml = Get-Content $f.FullName -Raw
+        if ($xml -notmatch '<uiResolution>') { return '界面分辨率: settings.xml 无 uiResolution（跳过）' }
+        $m = [regex]::Match($xml, '(?s)<uiResolution>.*?</uiResolution>')
+        if (-not $m.Success) { return '界面分辨率: 解析失败（跳过）' }
+        $block = $m.Value
+        $block = [regex]::Replace($block, '(<width value=")[^"]*(")', { param($x) $x.Groups[1].Value + $outW + $x.Groups[2].Value })
+        $block = [regex]::Replace($block, '(<height value=")[^"]*(")', { param($x) $x.Groups[1].Value + $outH + $x.Groups[2].Value })
+        $newText = $xml.Substring(0, $m.Index) + $block + $xml.Substring($m.Index + $m.Length)
+        if ($newText -ne $xml) { Set-Content -Path $f.FullName -Value $newText -Encoding UTF8 -NoNewline }
+        return ("界面分辨率: {0}x{1}（跟随输出）" -f $outW, $outH)
+    } catch { return ('界面分辨率设置失败: ' + $_.Exception.Message) }
+}
+
 function Launch-Game {
     try {
         if (-not $script:exe) { Add-Log '请先选择构建'; return }
@@ -2302,6 +2328,8 @@ function Launch-Game {
         Save-Cfg
         Add-Log ("启动: {0} / {1} / {2}p (scale {3})" -f $script:buildName, $envInfo.Console, $envInfo.Height, $envInfo.Scale)
         Add-Log ("缓存: {0}" -f $script:cacheDir)
+        $uiNote = Update-UiResolution $envInfo
+        if ($uiNote) { Add-Log $uiNote }
         New-Item -ItemType Directory -Force -Path $script:logDir | Out-Null
         $script:gameLog = Join-Path $script:logDir ("game-" + (Get-Date -Format 'yyyyMMdd-HHmmss') + ".log")
         $script:gameStart = Get-Date
